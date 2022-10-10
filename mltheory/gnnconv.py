@@ -1,4 +1,5 @@
 import numpy as np
+from numpy import polynomial as P
 import networkx as nx
 import matplotlib.pyplot as plt
 
@@ -25,15 +26,25 @@ class GraphConv:
         
         self.laplacian = self.degree_matrix - self.adjacency_matrix
         
-    def basic_poly_filter(self, degree: int, weights: np.ndarray) -> np.ndarray:
+    def basic_conv(self, degree: int, weights: np.ndarray) -> np.ndarray:
         # stack an array of laplacians horizontally given degree
         weights = weights[:degree]
         laplace_stack = np.array([np.linalg.matrix_power(self.laplacian, i) for i in range(degree)])
         # get the conv matrix output
         weight_stack = np.array([weights[i] * np.identity(self.laplacian.shape[0]) for i in range(degree)])
         return np.sum(np.matmul(laplace_stack, weight_stack), axis=0)
-        
-        
+    
+    def cheb_conv(self, degree: int, weights: np.ndarray) -> np.ndarray:
+        # normalize the laplacian according to eigenvalue
+        eigvals = np.linalg.eigvals(self.laplacian)
+        laplace_norm = 2 * self.laplacian / np.max(eigvals) - np.identity(self.laplacian.shape[0])
+        kernel_stack = np.array(
+            [np.identity(self.laplacian.shape[0])] 
+            + [P.chebyshev.chebval(np.linalg.matrix_power(laplace_norm, i), P.Chebyshev(range(i)).coef) for i in range(1, degree)]
+        )
+        weight_stack = np.array([weights[i] * np.identity(self.laplacian.shape[0]) for i in range(degree)])
+        return np.sum(np.matmul(kernel_stack, weight_stack), axis=0)
+
 if __name__ == '__main__':
     # example from Distill Pub
     node_labels = {6:'A',1:'B',0:'C',2:'D',3:'E',4:'F',5:'G'}
@@ -45,5 +56,9 @@ if __name__ == '__main__':
     x = np.random.rand(num_nodes, num_feats)
 
     graph_conv = GraphConv(edge_idx, x, node_labels)
-    kernel = graph_conv.basic_poly_filter(3, np.array([5, 2, 3, 4, 0, 0, 0]))
-    print(xprime)
+    
+    weights = np.array([5, 2, 3, 4, 0, 0, 0])
+    
+    # kernel_simple = graph_conv.basic_conv(3, weights)
+    kernel_cheb = graph_conv.cheb_conv(3, weights)
+    print(kernel_cheb)
