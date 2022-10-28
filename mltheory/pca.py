@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import qr
+from sklearn.decomposition import PCA
 
 class PrincipleComponentAnalysis:
     def __init__(self, input_dim: int, reduction_dim: int, data: np.ndarray = None, examples: int = 10) -> None:
@@ -13,12 +14,8 @@ class PrincipleComponentAnalysis:
         self.D = qr(self.D)[0][:,:self.reduction_dim]
         
     def optimization_step(self):
-        # Simplify trace instead of Frobenius norm
-        trace_arg = np.matmul(np.matmul(self.D.T, self.X.T), np.matmul(self.X, self.D))
-        trace_arg = trace_arg / np.linalg.norm(trace_arg, axis=1)
         # find eigendecomposition for XtX
         eigvals, eigvecs = np.linalg.eig(np.matmul(self.X.T, self.X))
-        
         top_indices = np.argsort(-eigvals)[:self.reduction_dim]
         eigvals = eigvals[top_indices]
         eigvecs = eigvecs[:, top_indices]
@@ -36,21 +33,27 @@ if __name__ == '__main__':
     original = p.X
     transformed = p.encode()
     
-    def plot(examples, i=0):
-        x = examples[:,0]
-        y = examples[:,1]
-        
-        if examples.shape[1] == 3:
-            fig = plt.figure(figsize=(12, 12))
-            ax = fig.add_subplot(projection='3d')
-            ax.scatter(x, y, examples[:, 2],color='red')
-        else:
-            plt.scatter(x,y,color='red')
-        
-        plt.figure(i)
-
+    # Comparison to SOTA Sklearn
+    pca = PCA(n_components=2)
+    components = pca.fit_transform(data)
     
-    plot(original, 0)
-    plot(transformed, 1)
+    plot = True
     
-    plt.show()
+    if plot:        
+        fig = plt.figure(figsize=(14,7))
+        
+        ax1 = fig.add_subplot(1,2,1) 
+        ax1.set_xlabel('Principal Component 1')
+        ax1.set_ylabel('Principal Component 2')
+        ax1.set_title('2 component PCA')
+        
+        ax2 = fig.add_subplot(1,2,2)
+        ax2.set_xlabel('Axis 1')
+        ax2.set_ylabel('Axis 2')
+        ax2.set_title('Original data')
+        
+        ax1.scatter(data[:,0],data[:,1],color='green')
+        ax1.scatter(transformed[:,0], transformed[:,1],color='blue')
+        ax2.scatter(components[:,0], components[:,1], color='red')
+        
+        plt.show()
