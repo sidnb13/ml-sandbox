@@ -1,7 +1,6 @@
 import numpy as np
 from numpy import polynomial as P
 import networkx as nx
-import matplotlib.pyplot as plt
 
 class GraphConv:
     def __init__(self, edge_idx: np.ndarray, x: np.ndarray, node_labels: dict) -> None:
@@ -39,26 +38,8 @@ class GraphConv:
         eigvals = np.linalg.eigvals(self.laplacian)
         laplace_norm = 2 * self.laplacian / np.max(eigvals) - np.identity(self.laplacian.shape[0])
         kernel_stack = np.array(
-            [np.identity(self.laplacian.shape[0])] 
+            [np.identity(self.laplacian.shape[0])] \
             + [P.chebyshev.chebval(np.linalg.matrix_power(laplace_norm, i), P.Chebyshev(range(i)).coef) for i in range(1, degree)]
         )
         weight_stack = np.array([weights[i] * np.identity(self.laplacian.shape[0]) for i in range(degree)])
         return np.sum(np.matmul(kernel_stack, weight_stack), axis=0)
-
-if __name__ == '__main__':
-    # example from Distill Pub
-    node_labels = {6:'A',1:'B',0:'C',2:'D',3:'E',4:'F',5:'G'}
-    edge_idx = np.array([[0,1],[0,2],[0,3],[0,4],[0,5],[1,6]])
-    
-    num_nodes = len(node_labels.keys())
-    num_feats = 5
-    
-    x = np.random.rand(num_nodes, num_feats)
-
-    graph_conv = GraphConv(edge_idx, x, node_labels)
-    
-    weights = np.array([5, 2, 3, 4, 0, 0, 0])
-    
-    # kernel_simple = graph_conv.basic_conv(3, weights)
-    kernel_cheb = graph_conv.cheb_conv(3, weights)
-    print(kernel_cheb)
