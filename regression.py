@@ -38,8 +38,7 @@ class LinearRegression:
         return torch.mm(X, self.w) + self.b
 
     def loss(self, y_hat, y):
-        # Reshape y in order to match batch size
-        return torch.mean((y_hat - y.reshape(y_hat.shape)) ** 2 / 2)
+        return torch.mean((y_hat - y) ** 2 / 2)
 
 
 class SGDOpt:
