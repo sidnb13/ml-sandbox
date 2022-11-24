@@ -23,7 +23,7 @@ class CustomData(Dataset):
                 
         self.X = X
         self.y = y
-        
+
     def __len__(self) -> int:
         return len(self.X)
     
