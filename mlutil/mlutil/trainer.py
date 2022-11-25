@@ -4,6 +4,7 @@ Functionality for training, validation, and testing.
 '''
 
 from collections import defaultdict
+import matplotlib.pyplot as plt
 
 class Trainer:
     def __init__(self, epochs=10) -> None:
