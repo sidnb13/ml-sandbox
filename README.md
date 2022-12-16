@@ -1,3 +1,3 @@
 # Deep Learning learning repository
 
-Personal repository to organize notebooks and code associated with independent study of deep learning.
+Implementations of papers and code to hack with tutorial examples as part of my study of deep learning.
