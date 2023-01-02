@@ -1,6 +1,10 @@
-**/*/dataset/
+# for D2L
 **/*/dataset/
 **/*/__pycache__/
-.DS_Store
 **/*/*.egg-info
 **/*/.venv
+
+# Everything else
+.DS_Store
+.vscode/
+data/*
