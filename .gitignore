@@ -1,8 +1,6 @@
-dataset/
-*/__pycache__/
+**/*/dataset/
+**/*/dataset/
+**/*/__pycache__/
 .DS_Store
-*/dataset/
-*/__pycache__/
-.DS_Store
-*/*.egg-info
-*/.venv
+**/*/*.egg-info
+**/*/.venv
