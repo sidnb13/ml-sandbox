@@ -1,3 +1,3 @@
-# Deep Learning learning repository
+# Machine Learning Sandbox
 
-Implementations of papers and code to hack with tutorial examples as part of my study of deep learning.
+Notebooks and code to go with deep learning experiments and quick experiments, as well as reimplementations of papers.
