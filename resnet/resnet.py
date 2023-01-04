@@ -1,27 +1,25 @@
 """ResNet implementation in PyTorch."""
 from datetime import datetime
-from typing import *
+from typing import Type
 
 import config
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import torchvision.transforms as transforms
 from absl import app, flags, logging
+from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchinfo import summary
-from torchvision import datasets
+from torchvision import datasets, transforms
 from tqdm import tqdm
 
 FLAGS = flags.FLAGS
 job_id = datetime.strftime(datetime.now(), "%m-%d-%y-%H-%M-%S")
 
+
 flags.DEFINE_string(
     "plot_name",
-    "resnet-{}.png".format(job_id),
+    f"resnet-{job_id}.png",
     "Name of the plot to save.",
 )
 
@@ -40,7 +38,7 @@ class ResidualBlock(nn.Module):
         super().__init__()
 
         self.expansion = expansion
-        self.NUM_CONV_LAYERS = 2
+        self.conv_layer_count = 2
 
         self.conv1 = nn.Conv2d(
             in_channels, pre_expansion_channels, kernel_size=3, stride=stride, padding=1
@@ -93,13 +91,16 @@ class Bottleneck(nn.Module):
     ) -> None:
         super().__init__()
         self.expansion = expansion
-        self.NUM_CONV_LAYERS = 3
+        self.conv_layer_count = 3
 
         # No batchnorm applied to the first conv layer
         self.conv1 = (
             nn.Conv2d(in_channels, pre_expansion_channels, kernel_size=1, stride=1)
             if in_channels != pre_expansion_channels
             else nn.Identity()
+        )
+        self.bn1 = (
+            nn.BatchNorm2d(pre_expansion_channels) if use_batchnorm else nn.Identity()
         )
         self.conv2 = nn.Conv2d(
             pre_expansion_channels,
@@ -134,10 +135,15 @@ class Bottleneck(nn.Module):
 
     def forward(self, x: torch.Tensor):
         out = self.conv1(x)
+        out = self.bn1(out)
         out = self.relu(out)
-        out = self.conv2(out_skip)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
         out = self.relu(out)
+
         out = self.conv3(out)
+        out = self.bn3(out)
 
         out += self.shortcut(x)
         return self.relu(out)
@@ -147,7 +153,7 @@ class ResNet(nn.Module):
     def __init__(self, in_channels=16, use_batchnorm=True) -> None:
         super().__init__()
         self.in_channels = in_channels
-        self.NUM_CONV_LAYERS = 1
+        self.conv_layer_count = 1
 
         # Pre-residual conv layer
         self.conv1 = nn.Conv2d(3, in_channels, kernel_size=3, stride=1, padding=1)
@@ -180,7 +186,7 @@ class ResNet(nn.Module):
         for stride_val in stride_pattern:
             blk = block(self.in_channels, channels, stride=stride_val)
             layers.append(blk)
-            self.NUM_CONV_LAYERS += blk.NUM_CONV_LAYERS
+            self.conv_layer_count += blk.conv_layer_count
             self.in_channels = channels * blk.expansion
 
         return nn.Sequential(*layers)
@@ -205,7 +211,7 @@ def see_data(dataloader: DataLoader, grid_dim=3):
     classes = config.classes
 
     # show images
-    fig, axs = plt.subplots(grid_dim, grid_dim, figsize=(5, 5))
+    _, axs = plt.subplots(grid_dim, grid_dim, figsize=(5, 5))
     for idx in np.arange(grid_dim**2):
         ax = axs[idx // grid_dim, idx % grid_dim]
         ax.imshow(images[idx].numpy().transpose(1, 2, 0))
@@ -217,18 +223,16 @@ def see_data(dataloader: DataLoader, grid_dim=3):
 def train_loop(model, dataloader_train, dataloader_test, criterion, optimizer):
     model.train()
 
-    logging.info(
-        "Training for {:4d} epochs with lr={:.6f}".format(config.epochs, config.lr)
-    )
-    
+    logging.info(f"Training for {config.epochs:4d} epochs with lr={config.lr:.6f}")
+
     train_losses, train_accs, eval_losses, eval_accs = [], [], [], []
 
     for epoch in range(config.epochs):
-        total_loss = 0
-        total_correct = 0
-
         for step, (data, target) in tqdm(
-            enumerate(dataloader_train), unit="batch", total=len(dataloader_train), leave=False
+            enumerate(dataloader_train),
+            unit="batch",
+            total=len(dataloader_train),
+            leave=False,
         ):
             data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
@@ -239,82 +243,67 @@ def train_loop(model, dataloader_train, dataloader_test, criterion, optimizer):
 
             optimizer.step()
 
-            total_loss += loss.item()
-            total_correct += torch.sum(torch.argmax(output, dim=1) == target)
+            num_correct = torch.sum(torch.argmax(output, dim=1) == target)
 
-            if step % config.checkpt_interval == 0:
-                                
-                torch.save(
-                    {
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "loss": loss,
-                        "step": step,
-                        "epoch": epoch,
-                    },
-                    config.checkpt_dir / "checkpt_{}.pt".format(job_id),
-                )
-                logging.debug(
-                    "Saved checkpoint at step {}, epoch {}".format(step, epoch)
-                )
+            if step % config.metric_res == 0:
+                train_losses.append(loss.item())
+                train_accs.append(num_correct / len(data))
+
+        eval_loss_list, eval_acc_list = compute_metrics(
+            dataloader_test, model, criterion
+        )
+
+        eval_losses.extend(eval_loss_list)
+        eval_accs.extend(eval_acc_list)
+
+        if epoch % config.checkpt_interval == 0:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "loss": loss,
+                    "epoch": epoch,
+                },
+                config.checkpt_dir / f"checkpt_{job_id}.pt",
+            )
+            logging.debug(f"Saved checkpoint at step {step}, epoch {epoch}")
 
         if epoch % config.log_interval == 0:
-            train_loss = total_loss / len(dataloader_train)
-            train_acc = total_loss / len(dataloader_train)
-            logging.info(
-                "Epoch: [{}/{}]\tLoss: {:.6f}\tAcc: {:.4f}".format(
-                    epoch,
-                    config.epochs,
-                    train_loss,
-                    train_acc,
-                    correct_preds / len(data),
-                )
-            )
-            
-            train_losses.append(train_loss)
-            train_accs.append(train_acc)
+            train_loss = np.mean(train_losses)
+            train_acc = np.mean(train_accs)
+            eval_loss = np.mean(eval_losses)
+            eval_acc = np.mean(eval_accs)
 
-        if step % config.eval_interval == 0:
-            eval_loss, eval_acc = compute_metrics(dataloader_test, model, criterion)
             logging.info(
-                "Eval: [{}/{}]\tLoss: {:.6f}\tAcc: {:.4f}".format(
-                    epoch,
-                    config.epochs,
-                    eval_loss,
-                    eval_acc,
-                )
+                f"Epoch: [{epoch}/{config.epochs}]\tTrLoss: {train_loss:.6f}\tTrAcc: {train_acc:.4f}\t EvLoss: {eval_loss:.6f}\t EvAcc: {eval_acc:.4f}"
             )
-            
-            eval_losses.append(eval_loss)
-            eval_accs.append(eval_acc)
-    
+
     save_plot(model, train_losses, train_accs, eval_losses, eval_accs)
 
 
 def compute_metrics(dataloader, model, criterion):
     model.eval()
 
-    total_loss = 0
-    total_correct = 0
+    loss_items, accuracies = [], []
 
     for data, target in dataloader:
         data, target = data.to(device), target.to(device)
         output = model(data)
         loss = criterion(output, target)
-        total_loss += loss.item()
-        total_correct += torch.sum(torch.argmax(output, dim=1) == target)
+        loss_items.append(loss.item())
+        accuracies.append(torch.sum(torch.argmax(output, dim=1) == target) / len(data))
 
-    return total_loss / len(dataloader), total_correct / len(dataloader.dataset)
+    return loss_items, accuracies
 
 
 def save_plot(model: ResNet, train_loss, train_acc, eval_loss, eval_acc):
-    plt.plot(train_loss, label="Train")
-    plt.plot(eval_loss, label="Eval")
-    plt.plot(train_acc, label="Train")
-    plt.plot(eval_acc, label="Eval")
-    plt.set_title("ResNet-{} {}".format(model.NUM_CONV_LAYERS, job_id))
+    plt.plot(train_loss, label="Train loss")
+    plt.plot(eval_loss, label="Eval loss")
+    plt.plot(train_acc, label="Train acc")
+    plt.plot(eval_acc, label="Eval acc")
+    plt.title(f"ResNet{model.conv_layer_count}_{job_id}")
     plt.legend()
-    plt.savefig(os.path.join(config.save_dir, FLAGS.plot_name))
+    plt.savefig(config.save_dir / FLAGS.plot_name)
 
 
 def main(argv):
@@ -352,13 +341,13 @@ def main(argv):
     model = ResNet().to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.CrossEntropyLoss()
-    
+
     # model summary
     summary(model)
     print(model)
-        
+
     train_loop(model, dataloader_train, dataloader_test, criterion, optimizer)
-    
+
 
 if __name__ == "__main__":
     app.run(main)
