@@ -1,6 +1,7 @@
 # for D2L
 **/*/dataset/
 **/*/__pycache__/
+*/__pycache__/
 **/*/*.egg-info
 **/*/.venv
 

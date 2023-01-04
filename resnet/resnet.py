@@ -150,7 +150,7 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, in_channels=16, use_batchnorm=True) -> None:
+    def __init__(self, in_channels=16, n_factor=1, use_batchnorm=True) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.conv_layer_count = 1
@@ -161,9 +161,9 @@ class ResNet(nn.Module):
         self.relu = nn.ReLU()
 
         # Residual blocks
-        self.layer1 = self._create_layer(ResidualBlock, 16, num_blks=1, stride=1)
-        self.layer2 = self._create_layer(ResidualBlock, 32, num_blks=1, stride=2)
-        self.layer3 = self._create_layer(ResidualBlock, 64, num_blks=1, stride=2)
+        self.layer1 = self._create_layer(ResidualBlock, 16, num_blks=n_factor, stride=1)
+        self.layer2 = self._create_layer(ResidualBlock, 32, num_blks=n_factor, stride=2)
+        self.layer3 = self._create_layer(ResidualBlock, 64, num_blks=n_factor, stride=2)
 
         # Linear output
         self.readout = nn.Sequential(
@@ -243,7 +243,7 @@ def train_loop(model, dataloader_train, dataloader_test, criterion, optimizer):
 
             optimizer.step()
 
-            num_correct = torch.sum(torch.argmax(output, dim=1) == target)
+            num_correct = torch.sum(torch.argmax(output, dim=1) == target).item()
 
             if step % config.metric_res == 0:
                 train_losses.append(loss.item())
@@ -275,7 +275,7 @@ def train_loop(model, dataloader_train, dataloader_test, criterion, optimizer):
             eval_acc = np.mean(eval_accs)
 
             logging.info(
-                f"Epoch: [{epoch}/{config.epochs}]\tTrLoss: {train_loss:.6f}\tTrAcc: {train_acc:.4f}\t EvLoss: {eval_loss:.6f}\t EvAcc: {eval_acc:.4f}"
+                f"Epoch: [{epoch + 1}/{config.epochs}]\tTrLoss: {train_loss:.6f}\tTrAcc: {train_acc:.4f}\t EvLoss: {eval_loss:.6f}\t EvAcc: {eval_acc:.4f}"
             )
 
     save_plot(model, train_losses, train_accs, eval_losses, eval_accs)
@@ -286,12 +286,14 @@ def compute_metrics(dataloader, model, criterion):
 
     loss_items, accuracies = [], []
 
-    for data, target in dataloader:
+    for step, (data, target) in enumerate(dataloader):
         data, target = data.to(device), target.to(device)
         output = model(data)
         loss = criterion(output, target)
-        loss_items.append(loss.item())
-        accuracies.append(torch.sum(torch.argmax(output, dim=1) == target) / len(data))
+        
+        if step % config.metric_res == 0:
+            loss_items.append(loss.item())
+            accuracies.append(torch.sum(torch.argmax(output, dim=1) == target).item() / len(data))
 
     return loss_items, accuracies
 
@@ -331,15 +333,19 @@ def main(argv):
 
     # set up data loader
     dataloader_train = torch.utils.data.DataLoader(
-        train_set, batch_size=64, shuffle=True, drop_last=False
+        train_set, batch_size=config.batch_size, shuffle=True, drop_last=False
     )
     dataloader_test = torch.utils.data.DataLoader(
-        test_set, batch_size=64, shuffle=False, drop_last=False
+        test_set, batch_size=config.batch_size, shuffle=False, drop_last=False
     )
 
     # configure training
-    model = ResNet().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    model = ResNet(n_factor=3).to(device) # ResNet20
+    
+    # if torch.cuda.device_count() > 1:
+    #     model = nn.DataParallel(model)
+    
+    optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=0.9, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
 
     # model summary

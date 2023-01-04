@@ -3,7 +3,7 @@
 import pathlib
 
 num_classes = 10
-batch_size = 64
+batch_size = 128
 lr = 1e-2
 classes = (
     "plane",
@@ -17,9 +17,9 @@ classes = (
     "ship",
     "truck",
 )
-epochs = 1
+epochs = 50
 log_interval = 1
-metric_res = 8
+metric_res = 32
 checkpt_interval = 8
 
 data_dir = "./data/cifar10"
