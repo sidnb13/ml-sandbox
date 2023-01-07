@@ -12,7 +12,7 @@ import kaggle
 import numpy as np
 from PIL import Image
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEBUG = True
 
 
@@ -24,16 +24,17 @@ class ProcessDataset:
     def get_kaggle_dataset():
         kaggle.api.authenticate()
         kaggle.api.dataset_download_files(
-            'sagyamthapa/handwritten-math-symbols', path='data/', unzip=True)
+            "sagyamthapa/handwritten-math-symbols", path=".data/", unzip=True
+        )
 
     @staticmethod
     def perform_preprocessing():
         # resize all images to 45x45 size optimize
-        dataset_path = './dataset'
-        for image_file in glob.glob(os.path.join(dataset_path, '**/*')):
-            if image_file.endswith('.jpg') or image_file.endswith('.png'):
+        dataset_path = "./dataset"
+        for image_file in glob.glob(os.path.join(dataset_path, "**/*")):
+            if image_file.endswith(".jpg") or image_file.endswith(".png"):
                 img = Image.open(image_file)
-                img = img.resize((45, 45)).convert('L')
+                img = img.resize((45, 45)).convert("L")
                 img.save(image_file)
 
         label_pairs = []
@@ -44,14 +45,14 @@ class ProcessDataset:
 
         for i, class_name_dir in enumerate(class_dirs):
             class_name = os.path.basename(class_name_dir)
-            for image in glob.glob(os.path.join(class_name_dir, '*')):
+            for image in glob.glob(os.path.join(class_name_dir, "*")):
                 label_pairs.append((image, i))
 
             labels_map[i] = class_name
 
-        with open('./dataset/latex_handwritten_labels.csv', 'w') as f:
+        with open("./dataset/latex_handwritten_labels.csv", "w") as f:
             for pair in label_pairs:
-                f.write(f'{pair[0]}, {pair[1]}\n')
+                f.write(f"{pair[0]}, {pair[1]}\n")
 
         return labels_map
 
@@ -64,12 +65,15 @@ class ProcessDataset:
         print(sum([train_size, val_size, test_size]))
 
         train_set, test_set, val_set = torch.utils.data.random_split(
-            dataset, [train_size, val_size, test_size])
+            dataset, [train_size, val_size, test_size]
+        )
         return train_set, val_set, test_set
 
 
 class LatexHandwrittenDataset(Dataset):
-    def __init__(self, annotations_file, img_dir, transform=None, target_transform=None):
+    def __init__(
+        self, annotations_file, img_dir, transform=None, target_transform=None
+    ):
         self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
         self.transform = transform
@@ -92,19 +96,20 @@ class LatexHandwrittenDataset(Dataset):
 def get_data():
     label_map = ProcessDataset.perform_preprocessing()
 
-    symbol_dataset = LatexHandwrittenDataset('./dataset/latex_handwritten_labels.csv', '',
-                                             transform=transforms.Compose(
-                                                 [transforms.ToPILImage(),
-                                                  transforms.ToTensor()]
-                                             ),
-                                             target_transform=transforms.Lambda(lambda y: torch.zeros(
-                                                 len(label_map.keys()), dtype=torch.float).scatter_(
-                                                 dim=0, index=torch.tensor(y), value=1
-                                             ))
-                                             )
+    symbol_dataset = LatexHandwrittenDataset(
+        "./dataset/latex_handwritten_labels.csv",
+        "",
+        transform=transforms.Compose([transforms.ToPILImage(), transforms.ToTensor()]),
+        target_transform=transforms.Lambda(
+            lambda y: torch.zeros(len(label_map.keys()), dtype=torch.float).scatter_(
+                dim=0, index=torch.tensor(y), value=1
+            )
+        ),
+    )
 
     train_set, val_set, test_set = ProcessDataset.get_train_val_test_splits(
-        symbol_dataset)
+        symbol_dataset
+    )
 
     train_dataloader = DataLoader(train_set, batch_size=64, shuffle=True)
     val_dataloader = DataLoader(val_set, batch_size=64, shuffle=True)
@@ -124,7 +129,7 @@ class NeuralNet(nn.Module):
             nn.ReLU(),
             nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(512, 19)  # 19 classes
+            nn.Linear(512, 19),  # 19 classes
         )
 
     def forward(self, x):
@@ -134,7 +139,9 @@ class NeuralNet(nn.Module):
 
 
 class TrainModel:
-    def __init__(self, train_loader, val_loader, test_loader, optimizer, loss_fn, model=NeuralNet) -> None:
+    def __init__(
+        self, train_loader, val_loader, test_loader, optimizer, loss_fn, model=NeuralNet
+    ) -> None:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
@@ -153,12 +160,12 @@ class TrainModel:
         # dont loop through dataloader.dataset will screw up batches
         for batch, (X, y) in enumerate(self.train_loader):
             if DEBUG:
-                print(f'TRAIN BATCH: X: {X.size()}, y: {y.size()}')
+                print(f"TRAIN BATCH: X: {X.size()}, y: {y.size()}")
 
             pred = self.model(X)
 
             if DEBUG:
-                print(f'PRED: {pred.shape}, Y: {y.shape}')
+                print(f"PRED: {pred.shape}, Y: {y.shape}")
 
             loss = self.loss_fn(pred, y)
 
@@ -177,9 +184,11 @@ class TrainModel:
 
                 print(f"[train loss]: {loss:>7f}  [{current:>5d}/{size:>5d}]")
                 print(
-                    f"[val acc]: {(val_acc_curr):>0.1f}%, [val loss (avg)]: {val_loss_curr:>8f}")
+                    f"[val acc]: {(val_acc_curr):>0.1f}%, [val loss (avg)]: {val_loss_curr:>8f}"
+                )
                 print(
-                    f"[test acc]: {(test_acc_curr):>0.1f}%, [test loss (avg)]: {test_loss_curr:>8f} \n")
+                    f"[test acc]: {(test_acc_curr):>0.1f}%, [test loss (avg)]: {test_loss_curr:>8f} \n"
+                )
 
                 self.train_loss.append(loss)
                 self.val_loss.append(val_loss_curr)
@@ -196,7 +205,7 @@ class TrainModel:
         with torch.no_grad():
             for X, y in self.val_loader:
                 if DEBUG:
-                    print(f'VAL BATCH: X: {X.size()}, y: {y.size()}')
+                    print(f"VAL BATCH: X: {X.size()}, y: {y.size()}")
 
                 output = self.model(X)
                 total += y.size(0)
@@ -204,10 +213,10 @@ class TrainModel:
                 # convert argmax output to onehot encoding
                 pred_argmax = output.argmax(1)
                 pred_onehot = torch.zeros_like(y).scatter_(
-                    1, pred_argmax.unsqueeze(1), 1)
+                    1, pred_argmax.unsqueeze(1), 1
+                )
 
-                correct_preds += (pred_onehot ==
-                                  y).type(torch.float).sum().item()
+                correct_preds += (pred_onehot == y).type(torch.float).sum().item()
                 running_loss += self.loss_fn(output, y)
 
         # compute avg loss
@@ -228,7 +237,7 @@ class TrainModel:
         with torch.no_grad():
             for X, y in self.test_loader:
                 if DEBUG:
-                    print(f'TEST BATCH: X: {X.size()}, y: {y.size()}')
+                    print(f"TEST BATCH: X: {X.size()}, y: {y.size()}")
 
                 pred = self.model(X)
                 total += y.size(0)
@@ -237,7 +246,8 @@ class TrainModel:
                 # convert argmax output to onehot encoding
                 pred_argmax = pred.argmax(1)
                 pred_onehot = torch.zeros_like(y).scatter_(
-                    1, pred_argmax.unsqueeze(1), 1)
+                    1, pred_argmax.unsqueeze(1), 1
+                )
 
                 correct += (pred_onehot == y).type(torch.float).sum().item()
 
@@ -261,30 +271,26 @@ def peruse_dataset(test_dataloader):
     label = train_labels[0]
 
     plt.imshow(img, cmap="gray")
-    plt.title(f'class name: {label_map[torch.argmax(label).item()]}')
+    plt.title(f"class name: {label_map[torch.argmax(label).item()]}")
     plt.show()
-    print(
-        f"Label: {label}, Class name: {label_map[torch.argmax(label).item()]}")
+    print(f"Label: {label}, Class name: {label_map[torch.argmax(label).item()]}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     train_dataloader, val_dataloader, test_dataloader = get_data()
 
-    hyperparams = {
-        'batch_size': 64,
-        'lr': 1e-3,
-        'epochs': 10
-    }
+    hyperparams = {"batch_size": 64, "lr": 1e-3, "epochs": 10}
 
     model = NeuralNet().to(DEVICE)
-    optimizer = torch.optim.SGD(model.parameters(), lr=hyperparams['lr'])
+    optimizer = torch.optim.SGD(model.parameters(), lr=hyperparams["lr"])
     loss_fn = nn.CrossEntropyLoss()
 
     model_trainer = TrainModel(
-        train_dataloader, val_dataloader, test_dataloader, optimizer, loss_fn, model)
+        train_dataloader, val_dataloader, test_dataloader, optimizer, loss_fn, model
+    )
 
-    for epoch in range(hyperparams['epochs']):
-        print(f'EPOCH {epoch + 1} -------------------')
+    for epoch in range(hyperparams["epochs"]):
+        print(f"EPOCH {epoch + 1} -------------------")
         model_trainer.train_loop()
 
     train_lossh = model_trainer.train_loss

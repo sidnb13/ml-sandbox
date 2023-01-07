@@ -4,12 +4,12 @@ from datetime import datetime
 # hyperparameters
 num_classes = 10
 batch_size = 100
-lr = 1e-3
-steps = 100_000
+lr = 1e-2
+steps = 10_000
 
 # vae params
 input_dim = 784
-latent_dim = 2
+latent_dim = 5
 hidden_dim = 512
 
 # general config
@@ -28,6 +28,8 @@ classes = (
 log_interval = 1000
 test_interval = 1000
 checkpt_interval = 8
+gen_samples = 10
+manifold_dim = 9
 
 data_dir = "./data/mnist"
 result_dir = "./data/vae/results"

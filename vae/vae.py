@@ -2,13 +2,15 @@
 
 import itertools
 import logging
-import pathlib
 
 import config
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from absl import app, flags
 from colorama import Fore, Style
+from scipy.stats import norm
+
 from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
@@ -27,7 +29,7 @@ flags.DEFINE_string(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class Encoder(nn.Module):
+class LinearEncoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim) -> None:
         super().__init__()
         self.lin1 = nn.Linear(input_dim, hidden_dim)
@@ -41,7 +43,7 @@ class Encoder(nn.Module):
         return mean, logvar
 
 
-class Decoder(nn.Module):
+class LinearDecoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim) -> None:
         super().__init__()
         self.lin1 = nn.Linear(latent_dim, hidden_dim)
@@ -55,8 +57,8 @@ class Decoder(nn.Module):
 class VAE(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim) -> None:
         super().__init__()
-        self.encoder = Encoder(input_dim, hidden_dim, latent_dim)
-        self.decoder = Decoder(input_dim, hidden_dim, latent_dim)
+        self.encoder = LinearEncoder(input_dim, hidden_dim, latent_dim)
+        self.decoder = LinearDecoder(input_dim, hidden_dim, latent_dim)
 
     def reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         eps = torch.randn_like(logvar)
@@ -89,10 +91,12 @@ def train_step(batch, model, optimizer):
     optimizer.step()
 
     return {
-        "kl": kl.item(),
-        "recon": recon.item(),
-        "total": total.item(),
+        "kl": kl.item() / len(x),
+        "recon": recon.item() / len(x),
+        "total": total.item() / len(x),
         "recon_x": recon_x,
+        "mu": mean,
+        "logvar": logvar,
         "z": z,
     }
 
@@ -104,23 +108,14 @@ def eval_step(batch, model):
     total, kl, recon = loss_fn(x, recon_x, mean, logvar)
 
     return {
-        "kl": kl.item(),
-        "recon": recon.item(),
-        "total": total.item(),
+        "kl": kl.item() / len(x),
+        "recon": recon.item() / len(x),
+        "total": total.item() / len(x),
         "recon_x": recon_x,
+        "mu": mean,
+        "logvar": logvar,
         "z": z,
     }
-
-
-def generate_comparisons(batch, recon_batch, step_num, n=10):
-    comparison = torch.cat(
-        [batch[:n], recon_batch.view(config.batch_size, 1, 28, 28)[:n]]
-    )
-    save_image(comparison.cpu(), f"{config.result_dir}/comp_{step_num}.png", nrow=n)
-
-
-def create_manifold():
-    pass
 
 
 def main(argv):
@@ -159,6 +154,9 @@ def main(argv):
     logging.info(
         f"Begin training for {config.steps:6d} steps with lr={config.lr:10.5f}..."
     )
+    
+    # Initialize noise for sampling
+    noise = torch.randn(config.batch_size, config.latent_dim).to(device)
 
     for step in range(config.steps):
         batch = next(train_iter)
@@ -189,9 +187,54 @@ def main(argv):
                 + f"kl: {kl / len(test_loader):10.5f}\trecon: {recon / len(test_loader):10.5f}"
             )
 
-            generate_comparisons(batch[0], out["recon_x"], step)
+            # sample reconstructions
+            comparison = torch.cat(
+                [
+                    batch[0][: config.gen_samples],
+                    out["recon_x"].view(config.batch_size, 1, 28, 28)[
+                        : config.gen_samples
+                    ],
+                ]
+            )
+            save_image(
+                comparison.cpu(),
+                f"{config.result_dir}/generated_{step // config.test_interval}.png",
+                nrow=config.gen_samples,
+            )
 
-            # TODO create manifolds
+            rand_sample_idx = np.random.randint(0, config.batch_size)
+
+            # plot latent Gaussian
+            fig, axs = plt.subplots(config.latent_dim, sharex=True, sharey=True)
+            fig.suptitle(
+                f"Latent Gaussian Distributions {step // config.test_interval}"
+            )
+
+            mu, sigma = (
+                out["mu"][rand_sample_idx].cpu().detach().numpy(),
+                torch.exp(0.5 * out["logvar"][rand_sample_idx]).cpu().detach().numpy(),
+            )
+
+            for i, ax in enumerate(axs):
+                x = np.linspace(mu[i] - 3 * sigma[i], mu[i] + 3 * sigma[i], 100)
+                pdf = norm(mu[i], sigma[i]).pdf(x)
+                ax.plot(x, pdf)
+
+            fig.savefig(f"{config.result_dir}/zdist_{step // config.test_interval}.png")
+
+            # create manifold
+            rows = cols = int(np.sqrt(len(noise)))
+            img_grid = np.zeros((28 * rows, 28 * cols))
+
+            with torch.no_grad():
+                for i in range(rows):
+                    for j in range(cols):
+                        z = noise[i * rows + j].to(device)
+                        img_grid[i * 28 : (i + 1) * 28, j * 28 : (j + 1) * 28] = (
+                            model.decoder(z).cpu().detach().numpy().reshape(28, 28)
+                        )
+            
+            save_image(torch.tensor(img_grid), f"{config.result_dir}/manifold_{step // config.test_interval}.png")
 
 
 if __name__ == "__main__":
