@@ -2,17 +2,18 @@ import pathlib
 from datetime import datetime
 
 # hyperparameters
-num_classes: int = 10
-batch_size: int = 64
-lr: float = 1e-3
-epochs: int = 10
+num_classes = 10
+batch_size = 100
+lr = 1e-3
+steps = 100_000
 
 # vae params
+input_dim = 784
 latent_dim = 2
-hidden_dim = 512
+hidden_dim = 500
 
 # general config
-classes: int = (
+classes = (
     "plane",
     "car",
     "bird",
@@ -24,10 +25,12 @@ classes: int = (
     "ship",
     "truck",
 )
-log_interval: int = 1
-metric_res: int = 32
-checkpt_interval: int = 8
-data_dir: str = "./data/cifar10"
-checkpt_dir: str = pathlib.Path(__file__).parent.absolute() / "checkpoints"
-save_dir: str = pathlib.Path(__file__).parent.absolute() / "results"
+log_interval = 100
+test_interval = 1000
+checkpt_interval = 8
+
+data_dir = "./data/mnist"
+result_dir = "./data/vae/results"
+checkpt_dir = pathlib.Path(result_dir) / "checkpoints"
+save_dir = pathlib.Path(result_dir) / "results"
 job_id = datetime.strftime(datetime.now(), "%m-%d-%y-%H-%M-%S")

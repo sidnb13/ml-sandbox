@@ -10,3 +10,5 @@ disable=
     C0115, # missing-class-docstring
     C0116, # missing-function-docstring
     C0103, # invalid-name
+    W1201, # logging-not-lazy
+    W1203, # logging-fstring-interpolation

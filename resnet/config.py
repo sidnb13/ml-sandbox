@@ -1,11 +1,18 @@
-# Config file for ResNet implementation
-
 import pathlib
+from datetime import datetime
 
-num_classes = 10
-batch_size = 128
-lr = 1e-2
-classes = (
+# hyperparameters
+num_classes: int = 10
+batch_size: int = 64
+lr: float = 1e-3
+epochs: int = 10
+
+# vae params
+latent_dim = 2
+hidden_dim = 512
+
+# general config
+classes: int = (
     "plane",
     "car",
     "bird",
@@ -17,11 +24,12 @@ classes = (
     "ship",
     "truck",
 )
-epochs = 50
-log_interval = 1
-metric_res = 32
-checkpt_interval = 8
+log_interval: int = 1
+metric_res: int = 32
+checkpt_interval: int = 8
 
-data_dir = "./data/cifar10"
-checkpt_dir = pathlib.Path(__file__).parent.absolute() / "checkpoints"
-save_dir = pathlib.Path(__file__).parent.absolute() / "results"
+data_dir: str = "./data/cifar10"
+result_dir: str = "./data/resnet/results"
+checkpt_dir: str = pathlib.Path(result_dir) / "checkpoints"
+save_dir: str = pathlib.Path(result_dir) / "results"
+job_id = datetime.strftime(datetime.now(), "%m-%d-%y-%H-%M-%S")

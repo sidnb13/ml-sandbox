@@ -14,12 +14,10 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 FLAGS = flags.FLAGS
-job_id = datetime.strftime(datetime.now(), "%m-%d-%y-%H-%M-%S")
-
 
 flags.DEFINE_string(
     "plot_name",
-    f"resnet-{job_id}.png",
+    f"resnet-{config.job_id}.png",
     "Name of the plot to save.",
 )
 
@@ -264,7 +262,7 @@ def train_loop(model, dataloader_train, dataloader_test, criterion, optimizer):
                     "loss": loss,
                     "epoch": epoch,
                 },
-                config.checkpt_dir / f"checkpt_{job_id}.pt",
+                config.checkpt_dir / f"checkpt_{config.job_id}.pt",
             )
             logging.debug(f"Saved checkpoint at step {step}, epoch {epoch}")
 
@@ -303,7 +301,7 @@ def save_plot(model: ResNet, train_loss, train_acc, eval_loss, eval_acc):
     plt.plot(eval_loss, label="Eval loss")
     plt.plot(train_acc, label="Train acc")
     plt.plot(eval_acc, label="Eval acc")
-    plt.title(f"ResNet{model.conv_layer_count}_{job_id}")
+    plt.title(f"ResNet{model.conv_layer_count}_{config.job_id}")
     plt.legend()
     plt.savefig(config.save_dir / FLAGS.plot_name)
 
