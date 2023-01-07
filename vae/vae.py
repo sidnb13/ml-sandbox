@@ -2,6 +2,7 @@
 
 import itertools
 import logging
+import pathlib
 
 import config
 import matplotlib.pyplot as plt
@@ -12,6 +13,7 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+from torchvision.utils import save_image
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,7 +60,7 @@ class VAE(nn.Module):
 
     def reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         eps = torch.randn_like(logvar)
-        z = mean + eps * torch.exp(logvar / 2)
+        z = mean + eps * torch.exp(logvar * 0.5)
         return z, mean, logvar
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -68,41 +70,57 @@ class VAE(nn.Module):
 
 
 def loss_fn(x, recon_x, mu, log_var):
-    kl_divergence = -0.5 * torch.sum(1 + log_var - torch.square(mu) - torch.exp(log_var))
+    kl_divergence = -0.5 * torch.sum(
+        1 + log_var - torch.square(mu) - torch.exp(log_var)
+    )
     recon_loss = F.binary_cross_entropy_with_logits(recon_x, x, reduction="sum")
-    return kl_divergence, recon_loss
+    return kl_divergence + recon_loss, kl_divergence, recon_loss
 
 
 def train_step(batch, model, optimizer):
     model.train()
-    x = batch[0].to(device).reshape(-1, config.input_dim) / 255.0
+    x = batch[0].to(device).reshape(-1, config.input_dim)
     optimizer.zero_grad()
-
     # take grads with respect to total loss
-    _, recon_x, mean, logvar = model(x)
-    kl, recon = loss_fn(x, recon_x, mean, logvar)
-
-    kl = kl.mean()
-    recon = recon.mean()
-    total = kl + recon
+    z, recon_x, mean, logvar = model(x)
+    total, kl, recon = loss_fn(x, recon_x, mean, logvar)
 
     total.backward()
     optimizer.step()
 
-    return kl.item(), recon.item(), total.item()
+    return {
+        "kl": kl.item(),
+        "recon": recon.item(),
+        "total": total.item(),
+        "recon_x": recon_x,
+        "z": z,
+    }
 
 
 def eval_step(batch, model):
     model.eval()
-    x = batch[0].to(device).reshape(-1, config.input_dim) / 255.0
-    _, recon_x, mean, logvar = model(x)
-    kl, recon = loss_fn(x, recon_x, mean, logvar)
+    x = batch[0].to(device).reshape(-1, config.input_dim)
+    z, recon_x, mean, logvar = model(x)
+    total, kl, recon = loss_fn(x, recon_x, mean, logvar)
 
-    kl = kl.mean()
-    recon = recon.mean()
-    total = kl + recon
+    return {
+        "kl": kl.item(),
+        "recon": recon.item(),
+        "total": total.item(),
+        "recon_x": recon_x,
+        "z": z,
+    }
 
-    return kl.item(), recon.item(), total.item()
+
+def generate_comparisons(batch, recon_batch, step_num, n=10):
+    comparison = torch.cat(
+        [batch[:n], recon_batch.view(config.batch_size, 1, 28, 28)[:n]]
+    )
+    save_image(comparison.cpu(), f"{config.result_dir}/comp_{step_num}.png", nrow=n)
+
+
+def create_manifold():
+    pass
 
 
 def main(argv):
@@ -139,48 +157,41 @@ def main(argv):
     train_iter = itertools.cycle(train_loader)
 
     logging.info(
-        f"Begin training for {config.steps:6d} steps with lr={config.lr:.6f}..."
+        f"Begin training for {config.steps:6d} steps with lr={config.lr:10.5f}..."
     )
 
     for step in range(config.steps):
         batch = next(train_iter)
-        kl, recon, total = train_step(batch, model, optimizer)
+        out = train_step(batch, model, optimizer)
+
+        _kl = out["kl"]
+        _recon = out["recon"]
+        _total = out["total"]
 
         if step % config.log_interval == 0:
             logging.info(
-                f"[Step {step:06d}]\tloss: {total:.5f}\tkl: {kl:.5f}\trecon: {recon:.5f}"
+                f"[Step {step:06d}]\tloss: {_total:10.5f}\t"
+                + f"kl: {_kl:10.5f}\trecon: {_recon:10.5f}"
             )
 
         if step % config.test_interval == 0:
             kl, recon, total = 0, 0, 0
 
             for test_batch in test_loader:
-                _kl, _recon, _total = eval_step(test_batch, model)
-                kl += _kl
-                recon += _recon
-                total += _total
-                
+                eval_out = eval_step(test_batch, model)
+                kl += eval_out["kl"]
+                recon += eval_out["recon"]
+                total += eval_out["total"]
+
             logging.info(
-                f"{Fore.GREEN}[Step {step:06d}]{Style.RESET_ALL}\tloss: {total / len(test_loader):.5f}\t"
-                + f"kl: {kl / len(test_loader):.5f}\trecon: {recon / len(test_loader):.5f}"
+                f"{Fore.GREEN}[Step {step:06d}]{Style.RESET_ALL}\t"
+                + f"loss: {total / len(test_loader):10.5f}\t"
+                + f"kl: {kl / len(test_loader):10.5f}\trecon: {recon / len(test_loader):10.5f}"
             )
 
-    # comparing original and generated images
-    x = next(iter(test_loader))[0][5]
-    x_recon = (
-        model(x.to(device).reshape(-1, config.input_dim) / 255.0)[1]
-        .detach()
-        .cpu()
-        .numpy()
-        .reshape(28, 28)
-    )
+            generate_comparisons(batch[0], out["recon_x"], step)
 
-    # plot original and generated
-    plt.subplot(1, 2, 1)
-    plt.imshow(x.numpy().reshape(28, 28), cmap="gray")
-    plt.subplot(1, 2, 2)
-    plt.imshow(x_recon, cmap="gray")
-    plt.savefig("vae_gen.png")
+            # TODO create manifolds
 
 
 if __name__ == "__main__":

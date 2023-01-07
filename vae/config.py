@@ -10,7 +10,7 @@ steps = 100_000
 # vae params
 input_dim = 784
 latent_dim = 2
-hidden_dim = 500
+hidden_dim = 512
 
 # general config
 classes = (
