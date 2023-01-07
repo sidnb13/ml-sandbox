@@ -4,6 +4,7 @@ import itertools
 import logging
 
 import config
+import matplotlib.pyplot as plt
 import torch
 from absl import app, flags
 from colorama import Fore, Style
@@ -11,7 +12,6 @@ from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 
@@ -68,7 +68,7 @@ class VAE(nn.Module):
 
 
 def loss_fn(x, recon_x, mu, log_var):
-    kl_divergence = -0.5 * torch.sum(1 + log_var - mu.pow(2) - torch.exp(log_var))
+    kl_divergence = -0.5 * torch.sum(1 + log_var - torch.square(mu) - torch.exp(log_var))
     recon_loss = F.binary_cross_entropy_with_logits(recon_x, x, reduction="sum")
     return kl_divergence, recon_loss
 
@@ -137,7 +137,6 @@ def main(argv):
 
     # train loop
     train_iter = itertools.cycle(train_loader)
-    test_iter = itertools.cycle(test_loader)
 
     logging.info(
         f"Begin training for {config.steps:6d} steps with lr={config.lr:.6f}..."
@@ -153,15 +152,21 @@ def main(argv):
             )
 
         if step % config.test_interval == 0:
-            test_batch = next(test_iter)
-            kl, recon, total = eval_step(test_batch, model)
+            kl, recon, total = 0, 0, 0
+
+            for test_batch in test_loader:
+                _kl, _recon, _total = eval_step(test_batch, model)
+                kl += _kl
+                recon += _recon
+                total += _total
+                
             logging.info(
-                f"{Fore.GREEN}[Step {step:06d}]{Style.RESET_ALL}\tloss: {total:.5f}\t"
-                + f"kl: {kl:.5f}\trecon: {recon:.5f}"
+                f"{Fore.GREEN}[Step {step:06d}]{Style.RESET_ALL}\tloss: {total / len(test_loader):.5f}\t"
+                + f"kl: {kl / len(test_loader):.5f}\trecon: {recon / len(test_loader):.5f}"
             )
 
     # comparing original and generated images
-    x = next(test_iter)[0][5]
+    x = next(iter(test_loader))[0][5]
     x_recon = (
         model(x.to(device).reshape(-1, config.input_dim) / 255.0)[1]
         .detach()

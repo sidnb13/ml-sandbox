@@ -25,7 +25,7 @@ classes = (
     "ship",
     "truck",
 )
-log_interval = 100
+log_interval = 1000
 test_interval = 1000
 checkpt_interval = 8
 
