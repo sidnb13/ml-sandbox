@@ -10,3 +10,4 @@
 .vscode/
 data/*
 **/*/checkpoints/
+**/*/results/
