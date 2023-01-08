@@ -2,6 +2,7 @@
 
 import itertools
 import logging
+import pathlib
 
 import config
 import matplotlib.pyplot as plt
@@ -155,9 +156,12 @@ def main(argv):
         f"Begin training for {config.steps:6d} steps with lr={config.lr:10.5f}..."
     )
     
-    # Initialize noise for sampling
-    noise = torch.randn(config.batch_size, config.latent_dim).to(device)
-
+    # clean the results folder
+    if pathlib.Path(config.result_dir).exists():
+        imgs = pathlib.Path(config.result_dir)
+        for path in imgs.glob("*.png"):
+            path.unlink()
+    
     for step in range(config.steps):
         batch = next(train_iter)
         out = train_step(batch, model, optimizer)
@@ -223,17 +227,20 @@ def main(argv):
             fig.savefig(f"{config.result_dir}/zdist_{step // config.test_interval}.png")
 
             # create manifold
-            rows = cols = int(np.sqrt(len(noise)))
-            img_grid = np.zeros((28 * rows, 28 * cols))
+            if config.latent_dim == 2:
+                dim = int(np.sqrt(len(batch[0])))
+                img_grid = np.zeros((28 * dim, 28 * dim))
+                
+                inverse_norm = norm.ppf(np.linspace(0.05, 0.95, dim))
 
-            with torch.no_grad():
-                for i in range(rows):
-                    for j in range(cols):
-                        z = noise[i * rows + j].to(device)
-                        img_grid[i * 28 : (i + 1) * 28, j * 28 : (j + 1) * 28] = (
-                            model.decoder(z).cpu().detach().numpy().reshape(28, 28)
-                        )
-            
+                with torch.no_grad():
+                    for i, x_inc in enumerate(inverse_norm):
+                        for j, y_inc in enumerate(inverse_norm):
+                            z = torch.Tensor([x_inc, y_inc], device=device)
+                            img_grid[i * 28 : (i + 1) * 28, j * 28 : (j + 1) * 28] = (
+                                model.decoder(z).cpu().detach().numpy().reshape(28, 28)
+                            )
+
             save_image(torch.tensor(img_grid), f"{config.result_dir}/manifold_{step // config.test_interval}.png")
 
 
