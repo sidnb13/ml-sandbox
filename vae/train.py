@@ -11,7 +11,6 @@ import torch
 from absl import app, flags
 from colorama import Fore, Style
 from scipy.stats import norm
-
 from torch import nn, optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
@@ -155,13 +154,13 @@ def main(argv):
     logging.info(
         f"Begin training for {config.steps:6d} steps with lr={config.lr:10.5f}..."
     )
-    
+
     # clean the results folder
     if pathlib.Path(config.result_dir).exists():
         imgs = pathlib.Path(config.result_dir)
         for path in imgs.glob("*.png"):
             path.unlink()
-    
+
     for step in range(config.steps):
         batch = next(train_iter)
         out = train_step(batch, model, optimizer)
@@ -230,7 +229,7 @@ def main(argv):
             if config.latent_dim == 2:
                 dim = int(np.sqrt(len(batch[0])))
                 img_grid = np.zeros((28 * dim, 28 * dim))
-                
+
                 inverse_norm = norm.ppf(np.linspace(0.05, 0.95, dim))
 
                 with torch.no_grad():
@@ -241,7 +240,10 @@ def main(argv):
                                 model.decoder(z).cpu().detach().numpy().reshape(28, 28)
                             )
 
-            save_image(torch.tensor(img_grid), f"{config.result_dir}/manifold_{step // config.test_interval}.png")
+            save_image(
+                torch.tensor(img_grid),
+                f"{config.result_dir}/manifold_{step // config.test_interval}.png",
+            )
 
 
 if __name__ == "__main__":

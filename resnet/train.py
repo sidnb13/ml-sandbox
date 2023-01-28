@@ -288,10 +288,12 @@ def compute_metrics(dataloader, model, criterion):
         data, target = data.to(device), target.to(device)
         output = model(data)
         loss = criterion(output, target)
-        
+
         if step % config.metric_res == 0:
             loss_items.append(loss.item())
-            accuracies.append(torch.sum(torch.argmax(output, dim=1) == target).item() / len(data))
+            accuracies.append(
+                torch.sum(torch.argmax(output, dim=1) == target).item() / len(data)
+            )
 
     return loss_items, accuracies
 
@@ -338,12 +340,14 @@ def main(argv):
     )
 
     # configure training
-    model = ResNet(n_factor=3).to(device) # ResNet20
-    
+    model = ResNet(n_factor=3).to(device)  # ResNet20
+
     # if torch.cuda.device_count() > 1:
     #     model = nn.DataParallel(model)
-    
-    optimizer = optim.SGD(model.parameters(), lr=config.lr, momentum=0.9, weight_decay=5e-4)
+
+    optimizer = optim.SGD(
+        model.parameters(), lr=config.lr, momentum=0.9, weight_decay=5e-4
+    )
     criterion = nn.CrossEntropyLoss()
 
     # model summary
