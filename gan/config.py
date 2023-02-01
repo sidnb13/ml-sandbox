@@ -21,4 +21,9 @@ data_dir = "./data/mnist"
 result_dir = "./data/gan/results"
 checkpt_dir = pathlib.Path(result_dir) / "checkpoints"
 save_dir = pathlib.Path(result_dir) / "results"
-job_id = datetime.strftime(datetime.now(), "%m-%d-%y-%H-%M-%S")
+job_id = datetime.strftime(datetime.now(), "gan-%m-%d-%y-%H-%M-%S")
+
+# wandb
+use_wandb = True
+wandb_entity = "sidharth-baskaran"
+wandb_project = "gan"

@@ -1,3 +1,4 @@
+import itertools
 from datetime import datetime
 
 import config
@@ -62,16 +63,22 @@ def create_block(in_dim: int, out_dim: int, act) -> nn.Sequential:
     )
 
 
-def discriminator_loss(self, real: torch.Tensor, fake: torch.Tensor) -> torch.Tensor:
-    pass
+class AdversarialLoss:
+    def __init__(self, gen: torch.nn.Module, disc: torch.nn.Module) -> None:
+        self.gen = gen
+        self.disc = disc
 
+    def discriminator_loss(
+        self, batch: torch.Tensor, noise: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.log(self.disc(batch)) + torch.log(1 - self.disc(self.gen(noise)))
 
-def generator_loss(self, fake: torch.Tensor) -> torch.Tensor:
-    pass
+    def generator_loss(self, noise: torch.Tensor) -> torch.Tensor:
+        return -torch.log(self.disc(self.gen(noise)))
 
 
 def sample_generator(self, n: int) -> torch.Tensor:
-    pass
+    raise NotImplementedError("sample_generator not implemented")
 
 
 def main(argv):
@@ -80,10 +87,15 @@ def main(argv):
     if FLAGS.use_wandb:
         wandb.init(
             settings=wandb.Settings(start_method="fork"),
-            project=config.wandb_config.get("wandb_project", "matdeeplearn"),
-            entity=config.wandb_config.get("wandb_entity", "fung-lab"),
-            name=config.wandb_config.get("wandb_name", "gan") + f"-{timestamp}",
-            config=config.wandb_config,
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=config.job_id,
+            config={
+                "lr": config.lr,
+                "batch_size": config.batch_size,
+                "steps": config.steps,
+                "dataset": "MNIST",
+            },
         )
 
     # prepare dataset
@@ -123,7 +135,7 @@ def main(argv):
     mean_ts = np.sqrt(np.mean(std_ts))
     std_ts = np.sqrt(np.mean(std_ts))
 
-    # initialize models and optimizer
+    # initialize models
     generator = Generator(config.latent_dim, np.prod(config.image_size)).to(device)
     discriminator = Discriminator(np.prod(config.image_size)).to(device)
 
@@ -139,13 +151,44 @@ def main(argv):
         momentum=config.init_momentum,
     )
 
-    # train model
+    loss = AdversarialLoss(generator, discriminator)
+
+    train_loader = itertools.cycle(train_loader)
+    test_loader = itertools.cycle(test_loader)
+
+    # training
     for step in range(config.steps):
-        # train discriminator for k steps
+        # train discriminator
+        for _ in range(config.k_steps):
+            noise = torch.randn(config.batch_size, config.latent_dim).to(device)
+            batch = next(iter(train_loader))[0].to(device)
+            # normalize
+            batch = (batch - mean_tr) / std_tr
+            # backprop
+            loss_disc = loss.discriminator_loss(batch, noise)
+            loss_disc.backward()
+            opt_disc.step()
+
         # train generator
-        # evaluate on test set
-        # log metrics
-        pass
+        noise = torch.randn(config.batch_size, config.latent_dim).to(device)
+        loss_gen = loss.generator_loss(noise)
+        loss_gen.backward()
+        opt_gen.step()
+
+        if step % config.log_interval == 0:
+            noise = torch.randn(config.batch_size, config.latent_dim).to(device)
+            g_out = generator(noise)
+            sample_generator(g_out, config.batch_size)
+            # log metrics
+            logging.info(
+                f"Step {step} | G_loss: {loss_gen:>4f} | D_loss: {loss_disc:>4f}"
+            )
+            wandb.log(
+                {
+                    "gen_loss": loss_gen,
+                    "disc_loss": loss_disc,
+                }
+            )
 
 
 if __name__ == "__main__":
