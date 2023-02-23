@@ -1,21 +1,21 @@
 import itertools
+import os
 from datetime import datetime
 
 import config
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import wandb
 from absl import app, flags, logging
-from colorama import Fore, Style
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
+import wandb
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FLAGS = flags.FLAGS
-flags.DEFINE_boolean("use_wandb", True, "Use wandb for experiment logging.")
+flags.DEFINE_boolean("use_wandb", False, "Use wandb for experiment logging.")
 
 timestamp = torch.tensor(datetime.now().timestamp()).to(device)
 timestamp = datetime.fromtimestamp(timestamp.int()).strftime("%Y-%m-%d-%H-%M-%S")
@@ -28,12 +28,16 @@ class Generator(nn.Module):
         self.latent_dim = latent_dim
         self.image_dim = image_dim
 
-        self.lin_list = torch.nn.ModuleList()
+        lin_list = torch.nn.ModuleList()
         prev = self.latent_dim
 
         for hidden_dim in config.hidden_dims:
-            self.lin_list.append(create_block(prev, hidden_dim, self.act))
+            lin_list.append(create_block(prev, hidden_dim, self.act))
             prev = hidden_dim
+
+        lin_list.append(create_block(hidden_dim, self.image_dim, "Tanh"))
+
+        self.lin_list = nn.Sequential(*lin_list)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.lin_list(x)
@@ -45,12 +49,16 @@ class Discriminator(nn.Module):
         self.act = act
         self.in_dim = in_dim
 
-        self.lin_list = nn.ModuleList()
+        lin_list = []
         prev = self.in_dim
 
         for hidden_dim in config.hidden_dims[::-1]:
-            self.lin_list.append(create_block(prev, hidden_dim, self.act))
+            lin_list.append(create_block(prev, hidden_dim, self.act))
             prev = hidden_dim
+
+        lin_list.append(create_block(hidden_dim, 1, "Sigmoid"))
+
+        self.lin_list = nn.Sequential(*lin_list)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.lin_list(x)
@@ -59,26 +67,19 @@ class Discriminator(nn.Module):
 def create_block(in_dim: int, out_dim: int, act) -> nn.Sequential:
     return nn.Sequential(
         nn.Linear(in_dim, out_dim),
-        getattr(nn, act)(),
+        getattr(nn, act)() if act is not None else nn.Identity(),
     )
 
 
-class AdversarialLoss:
-    def __init__(self, gen: torch.nn.Module, disc: torch.nn.Module) -> None:
-        self.gen = gen
-        self.disc = disc
-
-    def discriminator_loss(
-        self, batch: torch.Tensor, noise: torch.Tensor
-    ) -> torch.Tensor:
-        return torch.log(self.disc(batch)) + torch.log(1 - self.disc(self.gen(noise)))
-
-    def generator_loss(self, noise: torch.Tensor) -> torch.Tensor:
-        return -torch.log(self.disc(self.gen(noise)))
-
-
-def sample_generator(self, n: int) -> torch.Tensor:
-    raise NotImplementedError("sample_generator not implemented")
+def sample_generator(g_out: torch.Tensor, n: int) -> torch.Tensor:
+    path = f"{config.save_dir}/gen-{timestamp}.png"
+    if not os.path.exists(config.save_dir):
+        os.makedirs(config.save_dir)
+    save_image(
+        g_out[:n].view(-1, 1, *config.image_size),
+        path,
+        nrow=n,
+    )
 
 
 def main(argv):
@@ -107,6 +108,7 @@ def main(argv):
             transform=transforms.ToTensor(),
         ),
         batch_size=config.batch_size,
+        drop_last=True,
     )
     test_loader = DataLoader(
         datasets.MNIST(
@@ -116,11 +118,12 @@ def main(argv):
             transform=transforms.ToTensor(),
         ),
         batch_size=config.batch_size,
+        drop_last=True,
     )
 
     # normalization
-    mean_tr = mean_ts = 0.0
-    std_tr = std_ts = 0.0
+    mean_tr, mean_ts = 0.0, 0.0
+    std_tr, std_ts = 0.0, 0.0
 
     for (data_tr, _) in train_loader:
         mean_tr += np.mean(data_tr.numpy(), axis=(0, 2, 3))
@@ -134,6 +137,9 @@ def main(argv):
     std_tr /= len(train_loader)
     mean_ts = np.sqrt(np.mean(std_ts))
     std_ts = np.sqrt(np.mean(std_ts))
+
+    train_loader = itertools.cycle(train_loader)
+    test_loader = itertools.cycle(test_loader)
 
     # initialize models
     generator = Generator(config.latent_dim, np.prod(config.image_size)).to(device)
@@ -151,44 +157,82 @@ def main(argv):
         momentum=config.init_momentum,
     )
 
-    loss = AdversarialLoss(generator, discriminator)
+    criterion = torch.nn.BCELoss()
 
-    train_loader = itertools.cycle(train_loader)
-    test_loader = itertools.cycle(test_loader)
+    # fixed noise for sampling
+    fixed_noise = torch.randn(config.batch_size, config.latent_dim).to(device)
 
     # training
     for step in range(config.steps):
         # train discriminator
+        discriminator.train()
+
+        p_real, p_fake = 0, 0
+
         for _ in range(config.k_steps):
+            opt_disc.zero_grad()
             noise = torch.randn(config.batch_size, config.latent_dim).to(device)
+
             batch = next(iter(train_loader))[0].to(device)
-            # normalize
+
+            # prepare batch and compute outputs
             batch = (batch - mean_tr) / std_tr
-            # backprop
-            loss_disc = loss.discriminator_loss(batch, noise)
+            batch = batch.view(-1, np.prod(config.image_size))
+            # D(x)
+            disc_out_real = discriminator(batch)
+            # D(G(z))
+            disc_out_fake = discriminator(generator(noise))
+
+            # train on real data, compare to ground truth, log(D(x))
+            loss_disc_real = criterion(disc_out_real, torch.ones_like(disc_out_real))
+
+            # train on fake data, compare to ground truth, log(1 - D(G(z)))
+            loss_disc_fake = criterion(disc_out_fake, torch.zeros_like(disc_out_fake))
+
+            loss_disc = (loss_disc_fake + loss_disc_real) / 2
             loss_disc.backward()
+
+            # discriminator gradient update
             opt_disc.step()
 
+            # update probabilities
+            p_real += torch.mean(disc_out_real)
+            p_fake += torch.mean(disc_out_fake)
+
+        p_real /= config.k_steps
+        p_fake /= config.k_steps
+
         # train generator
+        generator.train()
+        opt_gen.zero_grad()
         noise = torch.randn(config.batch_size, config.latent_dim).to(device)
-        loss_gen = loss.generator_loss(noise)
+
+        gen_out = generator(noise)
+
+        # log(1 - D(G(z)))
+        disc_gen = discriminator(gen_out)
+        loss_gen = criterion(disc_gen, torch.zeros_like(disc_gen))
         loss_gen.backward()
         opt_gen.step()
 
         if step % config.log_interval == 0:
-            noise = torch.randn(config.batch_size, config.latent_dim).to(device)
-            g_out = generator(noise)
-            sample_generator(g_out, config.batch_size)
-            # log metrics
-            logging.info(
-                f"Step {step} | G_loss: {loss_gen:>4f} | D_loss: {loss_disc:>4f}"
-            )
-            wandb.log(
-                {
-                    "gen_loss": loss_gen,
-                    "disc_loss": loss_disc,
-                }
-            )
+            with torch.no_grad():
+                g_out = generator(fixed_noise)
+                sample_generator(g_out, config.batch_size)
+                # log metrics
+                loss_disc = loss_disc_fake + loss_disc_real
+                logging.info(
+                    f"[Step {step}]\tG_loss: {loss_gen:>4f}\tD_loss: {loss_disc:>4f}\tD(x): {p_real:>4f}\t D(G(z)): {p_fake:>4f}"
+                )
+                if FLAGS.use_wandb:
+                    wandb.log(
+                        {
+                            "G_loss": loss_gen,
+                            "D_loss": loss_disc,
+                            "D(G(z))": p_fake,
+                            "D(x)": p_real,
+                        }
+                    )
 
 
 if __name__ == "__main__":

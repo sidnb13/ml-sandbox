@@ -1,10 +1,12 @@
-import torch
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 
 class SyntheticData:
-    def __init__(self, w, b, noise=0.01, train_examples=1000, val_examples=100, batch=32) -> None:
+    def __init__(
+        self, w, b, noise=0.01, train_examples=1000, val_examples=100, batch=32
+    ) -> None:
         self.w = w
         self.b = b
         self.batch = batch
@@ -21,7 +23,7 @@ class SyntheticData:
         else:
             indices = torch.arange(len(self.val_X))
         for i in range(0, len(indices), self.batch):
-            batch_indices = torch.tensor(indices[i:i+self.batch])
+            batch_indices = torch.tensor(indices[i : i + self.batch])
             if train:
                 yield self.X[batch_indices], self.y[batch_indices]
             else:
@@ -89,16 +91,16 @@ def train(model, data, epochs=10, lr=0.01):
                 total_loss += loss.item()
 
         return total_loss / i
-    
+
     train_loss, val_loss = [], []
 
     for epoch in range(epochs):
         train = train_epoch()
         val = val_epoch()
-        print(f'Epoch {epoch} | Train Loss: {train_loss} | Validation Loss: {val_loss}')
+        print(f"Epoch {epoch} | Train Loss: {train_loss} | Validation Loss: {val_loss}")
         train_loss.append(train)
         val_loss.append(val)
-        
+
     return train_loss, val_loss
 
 
@@ -109,7 +111,7 @@ if __name__ == "__main__":
     model = LinearRegression(len(w))
     train_loss, val_loss = train(model, data)
 
-    plt.plot(train_loss, label='Training Loss')
-    plt.plot(val_loss, label='Validation Loss')
+    plt.plot(train_loss, label="Training Loss")
+    plt.plot(val_loss, label="Validation Loss")
     plt.legend()
     plt.show()

@@ -1,10 +1,12 @@
-'''
+"""
 A trainer class for training a model.
 Functionality for training, validation, and testing.
-'''
+"""
 
 from collections import defaultdict
+
 import matplotlib.pyplot as plt
+
 
 class Trainer:
     def __init__(self, epochs=10) -> None:
@@ -27,16 +29,17 @@ class Trainer:
                 val_loss += model.val_step(batch)
             val_loss /= len(val_loader)
 
-            self.metrics['tr_loss'].append(train_loss)
-            self.metrics['val_loss'].append(val_loss)
+            self.metrics["tr_loss"].append(train_loss)
+            self.metrics["val_loss"].append(val_loss)
 
             print(
-                f'Epoch: {epoch}, Train Loss: {train_loss:.3f}, Val Loss: {val_loss:.3f}')
+                f"Epoch: {epoch}, Train Loss: {train_loss:.3f}, Val Loss: {val_loss:.3f}"
+            )
 
     def plot(self):
         """Plot the training and validation loss."""
         for k, v in self.metrics.items():
             plt.plot(v, label=k)
         plt.legend()
-        plt.title('metrics')
+        plt.title("metrics")
         plt.show()

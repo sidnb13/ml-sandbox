@@ -1,16 +1,17 @@
+import glob
+import os
+from pathlib import Path
+
+import kaggle
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
+from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 from torchvision.io import read_image
-import os
-import glob
-import matplotlib.pyplot as plt
-from pathlib import Path
-import pandas as pd
-import kaggle
-import numpy as np
-from PIL import Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEBUG = True
