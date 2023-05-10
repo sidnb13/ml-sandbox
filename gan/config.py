@@ -17,8 +17,8 @@ hidden_dims = [128, 256, 512]
 
 # io and logging
 log_interval = 1000
-data_dir = "./data/mnist"
-result_dir = "./data/gan/"
+data_dir = "/Users/sidbaskaran/code/ml-sandbox/data/mnist"
+result_dir = "/Users/sidbaskaran/code/ml-sandbox/data/gan"
 checkpt_dir = pathlib.Path(result_dir) / "checkpoints"
 save_dir = pathlib.Path(result_dir) / "results"
 job_id = datetime.strftime(datetime.now(), "gan-%m-%d-%y-%H-%M-%S")

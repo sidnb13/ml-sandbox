@@ -13,7 +13,7 @@ from torchvision.utils import save_image
 
 import wandb
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.has_mps else "cpu")
 FLAGS = flags.FLAGS
 flags.DEFINE_boolean("use_wandb", False, "Use wandb for experiment logging.")
 
@@ -173,13 +173,13 @@ def main(argv):
             opt_disc.zero_grad()
             noise = torch.randn(config.batch_size, config.latent_dim).to(device)
 
-            batch = next(iter(train_loader))[0].to(device)
+            batch = next(iter(train_loader))[0]
 
             # prepare batch and compute outputs
             batch = (batch - mean_tr) / std_tr
             batch = batch.view(-1, np.prod(config.image_size))
             # D(x)
-            disc_out_real = discriminator(batch)
+            disc_out_real = discriminator(batch.to(device))
             # D(G(z))
             disc_out_fake = discriminator(generator(noise))
 

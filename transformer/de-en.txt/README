@@ -1,0 +1,13 @@
+ Corpus Name: MultiUN
+     Package: MultiUN in Moses format
+     Website: http://opus.nlpl.eu/MultiUN-v1.php
+     Release: v1
+Release date: Sat Mar  3 22:47:39 EET 2018
+
+This corpus is part of OPUS - the open collection of parallel corpora
+OPUS Website: http://opus.nlpl.eu
+
+Please cite the following article if you use any part of the corpus in your own work: J. Tiedemann, 2012, Parallel Data, Tools and Interfaces in OPUS. In Proceedings of the 8th International Conference on Language Resources and Evaluation (LREC 2012)
+
+This is a collection of translated documents from the United Nations originally compiled by Andreas Eisele and Yu Chen (see http://www.euromatrixplus.net/multi-un/). Please cite MultiUN: A Multilingual corpus from United Nation Documents, Andreas Eisele and Yu Chen, LREC 2010
+
