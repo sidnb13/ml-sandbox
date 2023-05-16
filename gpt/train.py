@@ -1,27 +1,44 @@
 """
-Implementation of an small causal/autoregressive transformer (decoder-only architecture), GPT-style.
+Implementation of an small decoder-only transfomer which autoregressively generates text.
 """
 
 import os
 import sys
-
-from absl import app, flags, logging
 from typing import Any
 
-from datasets import Dataset as HFDataset, DatasetDict, load_dataset, load_from_disk
+import psutil
+import torch
+from absl import app, flags, logging
+from datasets import Dataset as HFDataset
+from datasets import load_dataset
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.normalizers import BertNormalizer
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import BpeTrainer
+from torch import nn
+from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerFast
-
-import torch
-from torch.utils.data import DataLoader, Dataset
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("echo", None, "Text to echo.")
+# define command line flags
+flags.DEFINE_boolean(
+    "use_wandb",
+    False,
+    "Whether to use wandb.",
+)
+flags.DEFINE_enum(
+    "run_mode",
+    "train",
+    ["train", "test", "generate"],
+    "Mode to run GPT model in.",
+)
+flags.DEFINE_string(
+    "prompt",
+    "test",
+    "Prompt to use for autoregressive generation.",
+)
 
 
 def create_train_tokenizer(
@@ -29,19 +46,6 @@ def create_train_tokenizer(
     tokenizer_file_path: str,
     batch_size: int = 1000,
 ) -> PreTrainedTokenizerFast:
-    """Create a tokenizer from a raw dataset.
-
-    Args:
-        raw_dataset (HFDataset): _description_
-        tokenizer_file_path (str): _description_
-        batch_size (int, optional): _description_. Defaults to 1000.
-
-    Returns:
-        PreTrainedTokenizerFast: _description_
-
-    Yields:
-        Iterator[PreTrainedTokenizerFast]: _description_
-    """
     if not os.path.exists(tokenizer_file_path):
         # create the tokenizer
         tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
@@ -76,15 +80,6 @@ class SimpleTextDataset(Dataset):
         block_size: int,
         tokenizer_batch_size: int = 1000,
     ) -> None:
-        """A simple text dataset for causal/autoregressive models.
-
-        Args:
-            path (str): dataset path (e.g. "wikitext-2")
-            name (str): the name of the dataset
-            split (str): split of the dataset (e.g. "train")
-            block_size (int): The maximum length of a sequence in tokens.
-            tokenizer_batch_size (int, optional): Defaults to 1000.
-        """
         raw_dataset = load_dataset(path, name, split=split)
         # remove empty rows
         raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
@@ -126,18 +121,148 @@ class SimpleTextDataset(Dataset):
         }
 
 
+class DecoderBlock(nn.Module):
+    def __init__(
+        self, num_heads: int, embed_dim: int, attn_dropout: float, layer_dropout: float
+    ) -> None:
+        super().__init__()
+        self.multihead_attention = nn.MultiheadAttention(
+            embed_dim, num_heads, dropout=attn_dropout, batch_first=True
+        )
+        self.ln1 = nn.LayerNorm(embed_dim)
+        # positionwise FFN
+        self.feed_forward = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.GELU(),  # as in original GPT
+            nn.Linear(embed_dim * 4, embed_dim),
+            nn.Dropout(layer_dropout),
+        )
+        self.ln2 = nn.LayerNorm(embed_dim)
+
+    def forward(self, x: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+        del kwargs
+        # self attention and residual
+        T = x.size(1)
+        causal_mask = torch.tril(torch.ones(T, T)).to(x.device)
+        attn_out, attn_weights = self.multihead_attention(
+            x, x, x, attn_mask=causal_mask
+        )
+        x = self.ln1(x + attn_out)
+        # feed forward and residual
+        x = self.ln2(x + self.feed_forward(x))
+        return x, attn_weights
+
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        num_tokens: int,
+        blocks: int,
+        num_heads: int,
+        embed_dim: int,
+        attn_dropout: float,
+        layer_dropout: float,
+    ) -> None:
+        """Transformer based on decoder blocks.
+
+        Args:
+            num_tokens (int): the number of tokens per input sequence.
+            blocks (int): number of decoder blocks to stack.
+            num_heads (int): number of attention heads.
+            embed_dim (int): the embedding dimension.
+            attn_dropout (float): the dropout rate for attention layers.
+            layer_dropout (float): the dropout rate for the residual layers.
+        """
+        super().__init__()
+        self.stack_count = blocks
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.num_tokens = num_tokens
+        # word embedding layers
+        self.embedding = nn.Embedding(num_tokens, embed_dim)
+        self.pos_embedding = nn.Embedding(num_tokens, embed_dim)
+        self.positional_encoding(self.pos_embedding.weight)
+        # decoder stack
+        self.decoder_stack = nn.Sequential(
+            *[
+                DecoderBlock(
+                    num_heads,
+                    embed_dim,
+                    attn_dropout=attn_dropout,
+                    layer_dropout=layer_dropout,
+                )
+                for _ in range(blocks)
+            ]
+        )
+        self.dropout = nn.Dropout(layer_dropout)
+        # linear layer
+        self.linear = nn.Linear(embed_dim, num_tokens)
+        self.ln = nn.LayerNorm(embed_dim)
+        # weight tie between embedding and linear weights
+        self.linear.weight = self.embedding.weight
+
+    def positional_encoding(self, embed_weights: torch.Tensor):
+        # create positional encodings
+        pos = torch.arange(0, self.num_tokens, dtype=torch.float)
+        pos_encoding = torch.stack(
+            [
+                pos / pow(10000, (2 * dim // 2) / self.embed_dim)
+                for dim in range(self.embed_dim)
+            ],
+        ).transpose_(0, 1)
+        # assign positional encodings as non-trainable weights
+        embed_weights.requires_grad = False
+        embed_weights[:, 0::2] = torch.sin(pos_encoding[:, 0::2])
+        embed_weights[:, 1::2] = torch.cos(pos_encoding[:, 1::2])
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.embedding(idx) + self.pos_embedding(idx)
+        x = self.dropout(x)
+        x, attn_weights = self.decoder_stack(x)
+        x = self.ln(x)
+        x = self.linear(x)
+        return x, attn_weights
+
+
+def setup_device() -> torch.device:
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        logging.info(
+            f"Using CUDA device: {torch.cuda.get_device_name()} ({torch.cuda.device_count()}x)"
+        )
+        logging.info(
+            f"Memory available: {1e-9 * torch.cuda.mem_get_info(device)[0]:.1f} GB"
+        )
+        return device
+    elif torch.backends.mps.is_available():
+        logging.info("Using MPS device")
+        return torch.device("mps")
+
+    stats = psutil.virtual_memory()  # returns a named tuple
+    available = getattr(stats, "available")
+    logging.info(f"available memory: {1e-6 * available} mb")
+    return torch.device("cpu")
+
+
 def main(argv):
     del argv  # Unused.
 
-    dataset = SimpleTextDataset("wikitext", "wikitext-2-raw-v1", "train", 4)
+    # dataset = SimpleTextDataset("wikitext", "wikitext-2-raw-v1", "train", 4)
+    # print(dataset.decode(dataset[0]["input"]))
 
-    print(dataset.decode(dataset[0]["input"]))
+    device = setup_device()
 
-    print(
+    gpt = Transformer(4, 1, 1, 128, 0.1, 0.1).to(device)
+
+    print("num params", sum(p.numel() for p in gpt.parameters()))
+
+    out, _ = gpt(torch.zeros(1, 4, dtype=torch.long, device=device))
+
+    print(out)
+
+    logging.info(
         "Running under Python {0[0]}.{0[1]}.{0[2]}".format(sys.version_info),
-        file=sys.stderr,
     )
-    logging.info("echo is %s.", FLAGS.echo)
 
 
 if __name__ == "__main__":
