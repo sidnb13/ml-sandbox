@@ -9,6 +9,7 @@ import psutil
 import torch
 import wandb
 from absl import app, flags, logging
+from ml_collections import config_flags, config_dict
 from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -24,42 +25,25 @@ from transformers import PreTrainedTokenizerFast
 
 FLAGS = flags.FLAGS
 
-# define command line flags
-flags.DEFINE_boolean(
-    "use_wandb",
-    False,
-    "Whether to use wandb.",
+# define configuration file
+config_flags.DEFINE_config_file(
+    "config",
+    None,
+    "Config file for training.",
+    lock_config=True,
 )
-flags.DEFINE_string("wandb_entity", None, "Wandb entity.", required=True)
-flags.DEFINE_string("wandb_project", None, "Wandb project.", required=True)
+
+# define command line flags
 flags.DEFINE_enum(
     "run_mode",
     "train",
-    ["train", "test", "generate"],
+    ["train", "generate", "debug"],
     "Mode to run GPT model in.",
 )
 flags.DEFINE_string(
     "prompt",
-    "test",
+    None,
     "Prompt to use for autoregressive generation.",
-)
-flags.DEFINE_integer(
-    "batch_size",
-    100,
-    "Batch size (each with seq_len tokens).",
-    lower_bound=1,
-)
-flags.DEFINE_integer("steps", 10000, "Number of training steps.")
-flags.DEFINE_integer("embed_dim", 128, "Embedding dimension, a power of 2.")
-flags.DEFINE_integer("heads", 2, "Number of attention heads.")
-flags.DEFINE_integer("blocks", 3, "Number of transformer blocks.")
-flags.DEFINE_float("dropout", 0.1, "Dropout probability.")
-flags.DEFINE_integer(
-    "seq_len",
-    128,
-    "Sequence length for training in tokens.",
-    lower_bound=4,
-    upper_bound=1024,
 )
 flags.DEFINE_integer("gen_len", 128, "Sequence length for generation in tokens.")
 
@@ -109,9 +93,10 @@ def create_train_tokenizer(
         tokenizer.save(tokenizer_file_path)
     else:
         tokenizer = Tokenizer.from_file(tokenizer_file_path)
+
     # wrap in a fast tokenizer for reuse
     wrapped_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    return wrapped_tokenizer
+    return wrapped_tokenizer, tokenizer.get_vocab_size()
 
 
 class SimpleTextDataset(Dataset):
@@ -127,7 +112,7 @@ class SimpleTextDataset(Dataset):
         # remove empty rows
         raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
 
-        self.tokenizer = create_train_tokenizer(
+        self.tokenizer, self.vocab_size = create_train_tokenizer(
             raw_dataset,
             tokenizer_file_path=f"{path}-tokenizer.json",
             batch_size=tokenizer_batch_size,
@@ -211,7 +196,8 @@ class DecoderBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        num_tokens: int,
+        *,
+        vocab_size: int,
         blocks: int,
         num_heads: int,
         embed_dim: int,
@@ -232,10 +218,10 @@ class Transformer(nn.Module):
         self.stack_count = blocks
         self.num_heads = num_heads
         self.embed_dim = embed_dim
-        self.num_tokens = num_tokens
+        self.vocab_size = vocab_size
         # word embedding layers
-        self.embedding = nn.Embedding(num_tokens, embed_dim)
-        self.pos_embedding = nn.Embedding(num_tokens, embed_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embedding = nn.Embedding(vocab_size, embed_dim)
         self.positional_encoding(self.pos_embedding.weight)
         # decoder stack
         self.decoder_stack = nn.Sequential(
@@ -251,15 +237,14 @@ class Transformer(nn.Module):
             ]
         )
         self.dropout = nn.Dropout(layer_dropout)
-        # linear layer
-        self.linear = nn.Linear(embed_dim, num_tokens)
         self.ln = nn.LayerNorm(embed_dim)
         # weight tie between embedding and linear weights
+        self.linear = nn.Linear(embed_dim, vocab_size)
         self.linear.weight = self.embedding.weight
 
     def positional_encoding(self, embed_weights: torch.Tensor):
         # create positional encodings
-        pos = torch.arange(0, self.num_tokens, dtype=torch.float)
+        pos = torch.arange(0, self.vocab_size, dtype=torch.float)
         pos_encoding = torch.stack(
             [
                 pos / pow(10000, (2 * dim // 2) / self.embed_dim)
@@ -271,11 +256,18 @@ class Transformer(nn.Module):
         embed_weights[:, 0::2] = torch.sin(pos_encoding[:, 0::2])
         embed_weights[:, 1::2] = torch.cos(pos_encoding[:, 1::2])
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, idx: torch.Tensor, bypass_embedding: bool = False
+    ) -> torch.Tensor:
         # create embeddings
-        tok_embed = self.embedding(idx) * self.embed_dim**0.5
-        pos_embed = self.pos_embedding(idx)
-        input_embed = tok_embed + pos_embed
+        if bypass_embedding:
+            input_embed = torch.zeros(
+                (idx.size(0), idx.size(1), self.embed_dim), device=idx.device
+            )
+        else:
+            tok_embed = self.embedding(idx) * self.embed_dim**0.5
+            pos_embed = self.pos_embedding(idx)
+            input_embed = tok_embed + pos_embed
         # feed to transformer
         x = self.dropout(input_embed)
         x, attn_weights = self.decoder_stack(x)
@@ -284,20 +276,20 @@ class Transformer(nn.Module):
         return x, attn_weights
 
 
-def dumb_baseline(config: dict):
+def dumb_baseline(model: Transformer, device: torch.device):
     """Make sure the model is initialized correctly."""
-    device = setup_device()
     # get some basic model stats
-    gpt = Transformer(**config).to(device)
-    num_params = sum(p.numel() for p in gpt.parameters())
-    gpt.eval()
+    num_params = sum(p.numel() for p in model.parameters())
+    model.eval()
     sample = torch.zeros(1, 4, dtype=torch.long, device=device)
     # check loss at init
-    loss = Trainer.loss_fn(gpt, {"input": sample, "target": sample}, device)
-    random_init_loss = -torch.log(torch.tensor(1 / gpt.num_tokens))
+    loss = Trainer.loss_fn(
+        model, {"input": sample, "target": sample}, device, bypass_embedding=True
+    )
+    random_init_loss = -torch.log(torch.tensor(1 / model.vocab_size))
     logging.info(f"Number of parameters: {num_params}")
     logging.info(f"loss: {loss} | random_init: {random_init_loss}")
-    assert loss.item() - random_init_loss < 1e-5, "softmax loss check failed"
+    assert abs(loss.item() - random_init_loss) < 1e-5, "softmax loss check failed"
 
 
 class NoamOpt:
@@ -363,20 +355,23 @@ class Trainer:
         )
         self.device = device
 
+    @staticmethod
     def loss_fn(
-        self,
+        model: Transformer,
         batch: dict[str, torch.Tensor],
+        device: torch.device,
+        bypass_embedding: bool = False,
     ):
-        input_ids = batch["input"].to(self.device)
-        target_ids = batch["target"].to(self.device)
-        logits, _ = self.model(input_ids)
-        return F.cross_entropy(logits, target_ids)
+        input_ids = batch["input"].to(device)
+        target_ids = batch["target"].to(device)
+        logits, _ = model(input_ids, bypass_embedding=bypass_embedding)
+        return F.cross_entropy(logits.transpose(1, 2), target_ids)
 
     def train_step(self, batch: dict[str, torch.Tensor]):
         self.model.train()
         self.opt.zero_grad()
         # perform train step
-        loss = self.loss_fn(batch)
+        loss = Trainer.loss_fn(self.model, batch, self.device)
         loss.backward()
         self.opt.step()
         return loss.item()
@@ -384,58 +379,80 @@ class Trainer:
     def eval_step(self, batch: dict[str, torch.Tensor]):
         self.model.eval()
         with torch.no_grad():
-            loss = self.loss_fn(batch, self.device)
+            loss = Trainer.loss_fn(self.model, batch, self.device)
         return loss.item()
 
 
-def train(train_loader: DataLoader, trainer: Trainer, steps: int):
-    for step in range(steps):
-        # train
-        batch = next(iter(train_loader))
-        loss = trainer.train_step(batch)
-        # eval
-        if step % 100 == 0:
-            logging.info(
-                f"step: {step:07} | loss: {loss:3f} | lr: {trainer.opt._lr():.6f}"
-            )
-            if FLAGS.use_wandb:
-                wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
+def train(config: config_dict.ConfigDict):
+    if config.use_wandb:
+        wandb.init(
+            settings=wandb.Settings(start_method="fork"),
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            config=FLAGS.flag_values_dict(),
+        )
+
+    # create datasets
+    dataset_train = SimpleTextDataset(
+        "wikitext", "wikitext-2-raw-v1", "train", config.hyperparams.seq_len
+    )
+    train_loader = DataLoader(
+        dataset_train, batch_size=config.hyperparams.batch_size, shuffle=True
+    )
+
+    device = setup_device()
+
+    model_config = config_dict.FrozenConfigDict(
+        {
+            "vocab_size": dataset_train.vocab_size,
+            "blocks": config.hyperparams.blocks,
+            "num_heads": config.hyperparams.heads,
+            "embed_dim": config.hyperparams.embed_dim,
+            "attn_dropout": config.hyperparams.dropout,
+            "layer_dropout": config.hyperparams.dropout,
+        }
+    )
+
+    # ensure loss @ init is valid
+    def init_weights(m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    # create model
+    model = Transformer(**model_config).to(device)
+    model.apply(init_weights)
+
+    if FLAGS.run_mode == "debug":
+        return dumb_baseline(model, device)
+
+    if FLAGS.run_mode == "train":
+        # create trainer
+        trainer = Trainer(model, device)
+        # train model
+        train_iter = iter(train_loader)
+        for step in range(config.steps):
+            # train
+            batch = next(train_iter)
+            loss = trainer.train_step(batch)
+            # eval
+            if step % 100 == 0:
+                logging.info(
+                    f"step: {step:07} | loss: {loss:3f} | lr: {trainer.opt._lr():.6f}"
+                )
+                if config.use_wandb:
+                    wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
+    elif FLAGS.run_mode == "generate":
+        # sample from model to autoregressively generate text
+        pass
 
 
 def main(argv):
     del argv  # Unused.
 
-    if FLAGS.use_wandb:
-        wandb.init(
-            settings=wandb.Settings(start_method="fork"),
-            project=FLAGS.wandb_project,
-            entity=FLAGS.wandb_entity,
-            config=FLAGS.flag_values_dict(),
-        )
-
-    # TODO: add other modes (generation, finetune, etc.)
-    if FLAGS.run_mode == "train":
-        # create datasets
-        dataset_train = SimpleTextDataset(
-            "wikitext", "wikitext-2-raw-v1", "train", FLAGS.seq_len
-        )
-        train_loader = DataLoader(
-            dataset_train, batch_size=FLAGS.batch_size, shuffle=True
-        )
-        # create model
-        # TODO: centralize and streamline model config
-        model = Transformer(
-            FLAGS.seq_len,
-            FLAGS.blocks,
-            FLAGS.heads,
-            FLAGS.embed_dim,
-            FLAGS.dropout,
-            FLAGS.dropout,
-        )
-        # create trainer
-        trainer = Trainer(model, setup_device())
-        # train
-        train(train_loader, trainer, FLAGS.steps)
+    config = FLAGS.config
+    train(config)
 
 
 if __name__ == "__main__":
