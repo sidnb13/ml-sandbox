@@ -5,13 +5,12 @@ from datetime import datetime
 import config
 import numpy as np
 import torch
+import wandb
 from absl import app, flags, logging
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
-
-import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.has_mps else "cpu")
 FLAGS = flags.FLAGS

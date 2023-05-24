@@ -2,26 +2,18 @@
 Small decoder-only transfomer for autoregressive text generation.
 """
 
-import os
-from typing import Any, Iterator
+import pathlib
+import time
+from itertools import cycle
 
-import psutil
 import torch
 import wandb
 from absl import app, flags, logging
-from ml_collections import config_flags, config_dict
-from datasets import Dataset as HFDataset
-from datasets import load_dataset
-from tokenizers import Tokenizer
-from tokenizers.models import BPE
-from tokenizers.normalizers import BertNormalizer
-from tokenizers.pre_tokenizers import Whitespace
-from tokenizers.trainers import BpeTrainer
+from ml_collections import config_dict, config_flags
 from torch import nn
 from torch.nn import functional as F
-from torch import optim
-from torch.utils.data import Dataset, DataLoader
-from transformers import PreTrainedTokenizerFast
+from torch.utils.data import DataLoader
+from utils import SimpleTextDataset, Trainer, setup_device
 
 FLAGS = flags.FLAGS
 
@@ -48,120 +40,18 @@ flags.DEFINE_string(
 flags.DEFINE_integer("gen_len", 128, "Sequence length for generation in tokens.")
 
 
-def setup_device() -> torch.device:
-    if torch.cuda.is_available():
-        device = torch.device("cuda:0")
-        logging.info(
-            f"Using CUDA device: {torch.cuda.get_device_name()} ({torch.cuda.device_count()}x)"
-        )
-        logging.info(
-            f"Memory available: {1e-9 * torch.cuda.mem_get_info(device)[0]:.1f} GB"
-        )
-        return device
-    elif torch.backends.mps.is_available():
-        logging.info("Using MPS device")
-        return torch.device("mps")
-
-    stats = psutil.virtual_memory()  # returns a named tuple
-    available = getattr(stats, "available")
-    logging.info(f"available memory: {1e-6 * available} mb")
-    return torch.device("cpu")
-
-
-def create_train_tokenizer(
-    raw_dataset: HFDataset,
-    tokenizer_file_path: str,
-    batch_size: int = 1000,
-) -> PreTrainedTokenizerFast:
-    if not os.path.exists(tokenizer_file_path):
-        # create the tokenizer
-        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-        trainer = BpeTrainer(
-            special_tokens=["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"]
-        )
-        tokenizer.pre_tokenizer = Whitespace()
-        tokenizer.normalizer = BertNormalizer()
-
-        # train tokenizer in batches
-        def batch_iterator():
-            for i in range(0, len(raw_dataset), batch_size):
-                yield raw_dataset[i : i + batch_size]["text"]
-
-        tokenizer.train_from_iterator(
-            batch_iterator(), trainer=trainer, length=len(raw_dataset)
-        )
-        tokenizer.save(tokenizer_file_path)
-    else:
-        tokenizer = Tokenizer.from_file(tokenizer_file_path)
-
-    # wrap in a fast tokenizer for reuse
-    wrapped_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    return wrapped_tokenizer, tokenizer.get_vocab_size()
-
-
-class SimpleTextDataset(Dataset):
-    def __init__(
-        self,
-        path: str,
-        name: str,
-        split: str,
-        block_size: int,
-        tokenizer_batch_size: int = 1000,
-    ) -> None:
-        raw_dataset = load_dataset(path, name, split=split)
-        # remove empty rows
-        raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
-
-        self.tokenizer, self.vocab_size = create_train_tokenizer(
-            raw_dataset,
-            tokenizer_file_path=f"{path}-tokenizer.json",
-            batch_size=tokenizer_batch_size,
-        )
-
-        if os.path.exists(f"{path}-{split}-tokenized.pt"):
-            self.data = torch.load(f"{path}-{split}-tokenized.pt")
-        else:
-            encoded = raw_dataset.map(
-                lambda x: self.tokenizer(x["text"]),
-                batched=True,
-            )
-            # save as a series of tokens, discarding sentence structure
-            tokens = torch.cat([torch.tensor(x) for x in encoded["input_ids"]])
-            self.data = torch.tensor(tokens, dtype=torch.long)
-            torch.save(self.data, f"{path}-{split}-tokenized.pt")
-
-        self.block_size = block_size
-
-    def encode(self, block_input: str) -> torch.Tensor:
-        return self.tokenizer(block_input)["input_ids"]
-
-    def decode(self, block_ids: torch.Tensor) -> str:
-        return self.tokenizer.decode(block_ids)
-
-    def tokenize(self, block_input: str) -> list[str]:
-        return self.tokenizer.tokenize(block_input)
-
-    def __len__(self) -> int:
-        return len(self.data) - self.block_size
-
-    def __getitem__(self, index) -> Any:
-        # Consider block_size + 1 tokens from the dataset, starting from index.
-        return {
-            "input": self.data[index : index + self.block_size],
-            "target": self.data[index + 1 : index + self.block_size + 1],
-        }
-
-
 class DecoderBlock(nn.Module):
     def __init__(
         self,
         num_heads: int,
         embed_dim: int,
+        block_size: int,
         attn_dropout: float,
         layer_dropout: float,
         return_attn_weights: bool = False,
     ) -> None:
         super().__init__()
+        self.block_size = block_size
         self.multihead_attention = nn.MultiheadAttention(
             embed_dim, num_heads, dropout=attn_dropout, batch_first=True
         )
@@ -178,8 +68,9 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # self attention and residual
-        T = x.size(1)
-        causal_mask = torch.tril(torch.ones(T, T)).to(x.device)
+        causal_mask = torch.tril(torch.ones(self.block_size, self.block_size)).to(
+            x.device
+        )
         attn_out, attn_weights = self.multihead_attention(
             x, x, x, attn_mask=causal_mask
         )
@@ -201,24 +92,29 @@ class Transformer(nn.Module):
         blocks: int,
         num_heads: int,
         embed_dim: int,
+        block_size: int,
         attn_dropout: float,
         layer_dropout: float,
+        special_tokens: list[str],
     ) -> None:
         """Transformer based on decoder blocks.
 
         Args:
-            num_tokens (int): the number of tokens per input sequence.
+            vocab_size (int): |V| where V is vocab set.
             blocks (int): number of decoder blocks to stack.
             num_heads (int): number of attention heads.
             embed_dim (int): the embedding dimension.
+            block_size (int): the number of tokens per input.
             attn_dropout (float): the dropout rate for attention layers.
             layer_dropout (float): the dropout rate for the residual layers.
         """
         super().__init__()
         self.stack_count = blocks
+        self.block_size = block_size
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
+        self.special_tokens = special_tokens
         # word embedding layers
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_embedding = nn.Embedding(vocab_size, embed_dim)
@@ -229,6 +125,7 @@ class Transformer(nn.Module):
                 DecoderBlock(
                     num_heads,
                     embed_dim,
+                    block_size,
                     attn_dropout=attn_dropout,
                     layer_dropout=layer_dropout,
                     return_attn_weights=(i == blocks - 1),
@@ -259,11 +156,19 @@ class Transformer(nn.Module):
     def forward(
         self, idx: torch.Tensor, bypass_embedding: bool = False
     ) -> torch.Tensor:
+        # pad input
+        B, T = idx.size()
+        if T < self.block_size:
+            idx = F.pad(
+                idx,
+                (self.block_size - T, 0),
+                mode="constant",
+                value=self.special_tokens.index("[PAD]"),
+            )
+            T = idx.size(1)
         # create embeddings
         if bypass_embedding:
-            input_embed = torch.zeros(
-                (idx.size(0), idx.size(1), self.embed_dim), device=idx.device
-            )
+            input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
         else:
             tok_embed = self.embedding(idx) * self.embed_dim**0.5
             pos_embed = self.pos_embedding(idx)
@@ -275,16 +180,78 @@ class Transformer(nn.Module):
         x = self.linear(x)
         return x, attn_weights
 
+    def generate(
+        self,
+        prompt: torch.Tensor,
+        steps: int,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.9,
+    ):
+        """Autoregressively generate tokens from a prompt.
+        Uses combination of top-k and top-p nucleus sampling.
 
-def dumb_baseline(model: Transformer, device: torch.device):
+        Args:
+            prompt (torch.Tensor): input_ids of shape (B, T).
+            steps (int): number of tokens to generate.
+            temperature (float, optional): sampling temp. Defaults to 1.0.
+            top_k (int, optional): top-k k value. Defaults to None.
+            top_p (float, optional): top-p nucleus probability. Defaults to 0.9.
+        """
+        _, T = prompt.size()
+        assert 0 < steps
+        padded_prompt = F.pad(
+            prompt,
+            (0, steps),
+            value=self.special_tokens.index("[PAD]"),
+            mode="constant",
+        )
+        self.eval()
+        # autoregressively generate tokens
+        for i in range(T, steps):
+            logits, _ = self.forward(
+                padded_prompt[:, i - self.block_size : i],
+                bypass_embedding=False,
+            )
+            # only use last token logits
+            logits = logits[:, -1, :] / temperature
+
+            # top-k sampling
+            if top_k > 0:
+                top_k_indices = torch.topk(logits, top_k, largest=False, dim=-1).indices
+                logits[top_k_indices] = -float("inf")
+
+            # nucleus sampling
+            if 1 > top_p > 0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                remove_idx = cum_probs > top_p
+                # correct removal indices to keep first token
+                remove_idx[:, 0] = 0
+                remove_idx[:, 1:] = remove_idx[:, :-1].clone()
+                removal_indices = sorted_indices[remove_idx]
+                logits[removal_indices] = -float("inf")
+
+            # sample from filtered distribution
+            dist = F.softmax(logits, dim=-1)
+            next_token_idx = torch.multinomial(dist, 1).squeeze()
+            padded_prompt[:, i] = next_token_idx
+
+        return padded_prompt.squeeze()
+
+
+def init_test(model: Transformer, device: torch.device):
     """Make sure the model is initialized correctly."""
     # get some basic model stats
     num_params = sum(p.numel() for p in model.parameters())
     model.eval()
     sample = torch.zeros(1, 4, dtype=torch.long, device=device)
+    # generate random text
+    logging.info(f"Sample: {model.generate(sample, 4)}")
     # check loss at init
+    ip = torch.zeros(1, model.block_size, device=device, dtype=torch.long)
     loss = Trainer.loss_fn(
-        model, {"input": sample, "target": sample}, device, bypass_embedding=True
+        model, {"input": ip, "target": ip}, device, bypass_embedding=True
     )
     random_init_loss = -torch.log(torch.tensor(1 / model.vocab_size))
     logging.info(f"Number of parameters: {num_params}")
@@ -292,98 +259,84 @@ def dumb_baseline(model: Transformer, device: torch.device):
     assert abs(loss.item() - random_init_loss) < 1e-5, "softmax loss check failed"
 
 
-class NoamOpt:
-    def __init__(
-        self,
-        parameters: Iterator[torch.nn.Parameter],
-        lr: float = 0,
-        betas: tuple[float, float] = (0.9, 0.98),
-        eps: float = 1e-9,
-        embed_dim: int = 512,
-        warmup_steps: int = 4000,
-    ) -> None:
-        """Implements the Noam learning rate schedule.
+def train(
+    model: Transformer, train_loader: DataLoader, device: torch.device, config: dict
+):
+    """Train the model.
 
-        Args:
-            parameters (Iterator[torch.nn.Parameter]): the model parameters.
-            lr (float, optional): initial lr. Defaults to 0.
-            betas (tuple[float, float], optional): betas for Adam. Defaults to (0.9, 0.98).
-            eps (float, optional): eps for Adam. Defaults to 1e-9.
-            embed_dim (int, optional): model embedding dimension. Defaults to 512.
-            warmup_steps (int, optional): warmup steps prior to decay. Defaults to 4000.
-        """
-        self.opt = optim.Adam(parameters, lr=lr, betas=betas, eps=eps)
-        self.embed_dim = embed_dim
-        self.warmup_steps = warmup_steps
-        self._step = 0
-
-    def zero_grad(self):
-        self.opt.zero_grad()
-
-    def step(self):
-        self._step += 1
-        self._update_lr()
-        self.opt.step()
-
-    def _lr(self):
-        # lrate = d^−0.5 * min(step_num−0.5, step_num * warmup_steps^−1.5)
-        return self.embed_dim**-0.5 * min(
-            self._step**-0.5, self._step * self.warmup_steps**-1.5
-        )
-
-    def _update_lr(self):
-        for param_group in self.opt.param_groups:
-            param_group["lr"] = self._lr()
+    Args:
+        model (Transformer): model to train
+        train_loader (DataLoader): the training data loader
+        device (torch.device): device to train on
+        config (dict): source of truth
+    """
+    # create trainer
+    trainer = Trainer(model, device)
+    # train model
+    train_iter = cycle(iter(train_loader))
+    # model load logic
+    if config.model_path is not None and config.load_model:
+        path = pathlib.Path(config.model_path) / "checkpoint.pt"
+        if not path.exists():
+            raise ValueError(f"Model path {path} does not exist.")
+        logging.info(f"Loading model from {path}")
+        trainer.load_checkpoint(path)
+        start_step = trainer.opt._step
+    # train loop
+    for step in range(start_step, config.steps):
+        batch = next(train_iter)
+        start = time.time()
+        loss = trainer.train_step(batch)
+        end = time.time()
+        # eval
+        if step % config.log_interval == 0:
+            logging.info(
+                f"step: {step:07}\t| loss: {loss:3f}\t| lr: {trainer.opt._lr():.6f}\t| time: {end - start:.2f}"
+            )
+            if config.use_wandb:
+                wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
+            trainer.save_checkpoint(pathlib.Path(config.model_path) / "checkpoint.pt")
 
 
-class Trainer:
-    def __init__(self, model: Transformer, device: torch.device) -> None:
-        """Training class to centralize training and validation logic.
+def sample(
+    model: Transformer,
+    prompt: str,
+    tokenizer,
+    config: config_dict,
+    device: torch.device,
+):
+    """Decode a prompt using the model.
 
-        Args:
-            model (Transformer): the model to train.
-            device (torch.device): device to use for training.
-        """
-        self.model = model.to(device)
-        self.opt = NoamOpt(
-            model.parameters(),
-            lr=0,
-            betas=(0.9, 0.98),
-            eps=1e-9,
-            embed_dim=model.embed_dim,
-            warmup_steps=4000,
-        )
-        self.device = device
+    Args:
+        model (Transformer): _description_
+        prompt (str): string prompt to start generation
+        tokenizer (_type_): tokenizer
+        config (config_dict): source of truth
+        device (torch.device): _description_
 
-    @staticmethod
-    def loss_fn(
-        model: Transformer,
-        batch: dict[str, torch.Tensor],
-        device: torch.device,
-        bypass_embedding: bool = False,
-    ):
-        input_ids = batch["input"].to(device)
-        target_ids = batch["target"].to(device)
-        logits, _ = model(input_ids, bypass_embedding=bypass_embedding)
-        return F.cross_entropy(logits.transpose(1, 2), target_ids)
-
-    def train_step(self, batch: dict[str, torch.Tensor]):
-        self.model.train()
-        self.opt.zero_grad()
-        # perform train step
-        loss = Trainer.loss_fn(self.model, batch, self.device)
-        loss.backward()
-        self.opt.step()
-        return loss.item()
-
-    def eval_step(self, batch: dict[str, torch.Tensor]):
-        self.model.eval()
-        with torch.no_grad():
-            loss = Trainer.loss_fn(self.model, batch, self.device)
-        return loss.item()
+    Returns:
+        str: generated text including the prompt
+    """
+    # if empty prompt, begin with SOS token
+    if prompt == "":
+        raise NotImplementedError("Empty prompt not yet supported.")
+    path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
+    if path.exists():
+        model.load_state_dict(torch.load(path, map_location=device))
+    generated_tokens = model.generate(
+        tokenizer.encode(prompt, return_tensors="pt").to(device), FLAGS.gen_len
+    )
+    return tokenizer.decode(generated_tokens)
 
 
-def train(config: config_dict.ConfigDict):
+def entrypoint(config: config_dict.ConfigDict):
+    """Main entrypoint for different tasks."""
+    logging.info(f"Using wandb: {config.use_wandb}")
+    device = setup_device()
+
+    # seed
+    torch.manual_seed(config.seed)
+
     if config.use_wandb:
         wandb.init(
             settings=wandb.Settings(start_method="fork"),
@@ -393,14 +346,10 @@ def train(config: config_dict.ConfigDict):
         )
 
     # create datasets
-    dataset_train = SimpleTextDataset(
-        "wikitext", "wikitext-2-raw-v1", "train", config.hyperparams.seq_len
-    )
+    dataset_train = SimpleTextDataset("wikitext", "wikitext-2-raw-v1", "train", config)
     train_loader = DataLoader(
         dataset_train, batch_size=config.hyperparams.batch_size, shuffle=True
     )
-
-    device = setup_device()
 
     model_config = config_dict.FrozenConfigDict(
         {
@@ -408,8 +357,10 @@ def train(config: config_dict.ConfigDict):
             "blocks": config.hyperparams.blocks,
             "num_heads": config.hyperparams.heads,
             "embed_dim": config.hyperparams.embed_dim,
+            "block_size": config.hyperparams.block_size,
             "attn_dropout": config.hyperparams.dropout,
             "layer_dropout": config.hyperparams.dropout,
+            "special_tokens": config.special_tokens,
         }
     )
 
@@ -425,34 +376,21 @@ def train(config: config_dict.ConfigDict):
     model.apply(init_weights)
 
     if FLAGS.run_mode == "debug":
-        return dumb_baseline(model, device)
-
+        return init_test(model, device)
     if FLAGS.run_mode == "train":
-        # create trainer
-        trainer = Trainer(model, device)
-        # train model
-        train_iter = iter(train_loader)
-        for step in range(config.steps):
-            # train
-            batch = next(train_iter)
-            loss = trainer.train_step(batch)
-            # eval
-            if step % 100 == 0:
-                logging.info(
-                    f"step: {step:07} | loss: {loss:3f} | lr: {trainer.opt._lr():.6f}"
-                )
-                if config.use_wandb:
-                    wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
+        train(model, train_loader, device, config)
     elif FLAGS.run_mode == "generate":
-        # sample from model to autoregressively generate text
-        pass
+        generated_text = sample(
+            model, FLAGS.prompt, dataset_train.tokenizer, config, device
+        )
+        logging.info(f"Generated text: '{generated_text}'")
 
 
 def main(argv):
     del argv  # Unused.
 
     config = FLAGS.config
-    train(config)
+    entrypoint(config)
 
 
 if __name__ == "__main__":
