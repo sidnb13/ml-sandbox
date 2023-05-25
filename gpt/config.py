@@ -6,18 +6,21 @@ def get_config():
     # general
     config.seed = 38
     config.steps = 10000
-    config.special_tokens = ["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"]
+    config.special_tokens = ["<unk>", "<sos>", "<eos>", "<pad>", "<mask>"]
     # hyperparameters
     config.hyperparams = config_dict.ConfigDict(
         {
-            "batch_size": 16,
-            "embed_dim": 64,
+            "batch_size": 32,
+            "embed_dim": 128,
             "heads": 4,
-            "blocks": 3,
+            "blocks": 6,
             "dropout": 0.1,
-            "block_size": 16,
+            "block_size": 64,
         }
     )
+    config.warmup_steps = 4000
+    config.betas = (0.9, 0.98)
+    config.eps = 1e-9
     config.load_model = False
     # io and logging
     config.log_interval = 1000

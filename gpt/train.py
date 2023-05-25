@@ -271,17 +271,17 @@ def train(
         config (dict): source of truth
     """
     # create trainer
-    trainer = Trainer(model, device)
+    trainer = Trainer(model, config, device)
     # train model
     train_iter = cycle(iter(train_loader))
     # model load logic
-    if config.model_path is not None and config.load_model:
-        path = pathlib.Path(config.model_path) / "checkpoint.pt"
-        if not path.exists():
-            raise ValueError(f"Model path {path} does not exist.")
-        logging.info(f"Loading model from {path}")
-        trainer.load_checkpoint(path)
-        start_step = trainer.opt._step
+    model_path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
+    if config.checkpt_dir is not None and config.load_model:
+        if not model_path.exists():
+            raise ValueError(f"Model path {model_path} does not exist.")
+        logging.info(f"Loading model from {model_path}")
+        trainer.load_checkpoint(model_path)
+    start_step = max(trainer.opt._step, 0)
     # train loop
     for step in range(start_step, config.steps):
         batch = next(train_iter)
@@ -291,11 +291,12 @@ def train(
         # eval
         if step % config.log_interval == 0:
             logging.info(
-                f"step: {step:07}\t| loss: {loss:3f}\t| lr: {trainer.opt._lr():.6f}\t| time: {end - start:.2f}"
+                f"step: {step:07}\t|\tloss: {loss:3f}\t|\tlr: {trainer.opt._lr():6f}\t|\ttime: {end - start:2f}"
             )
             if config.use_wandb:
                 wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
-            trainer.save_checkpoint(pathlib.Path(config.model_path) / "checkpoint.pt")
+                wandb.save(model_path)
+            trainer.save_checkpoint(model_path)
 
 
 def sample(

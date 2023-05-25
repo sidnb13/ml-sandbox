@@ -22,7 +22,6 @@ class NoamOpt:
     def __init__(
         self,
         parameters: Iterator[torch.nn.Parameter],
-        lr: float = 0,
         betas: tuple[float, float] = (0.9, 0.98),
         eps: float = 1e-9,
         embed_dim: int = 512,
@@ -38,18 +37,18 @@ class NoamOpt:
             embed_dim (int, optional): model embedding dimension. Defaults to 512.
             warmup_steps (int, optional): warmup steps prior to decay. Defaults to 4000.
         """
-        self.opt = optim.Adam(parameters, lr=lr, betas=betas, eps=eps)
+        self._opt = optim.Adam(parameters, betas=betas, eps=eps)
         self.embed_dim = embed_dim
         self.warmup_steps = warmup_steps
         self._step = 0
 
     def zero_grad(self):
-        self.opt.zero_grad()
+        self._opt.zero_grad()
 
     def step(self):
         self._step += 1
         self._update_lr()
-        self.opt.step()
+        self._opt.step()
 
     def _lr(self):
         # lrate = d^−0.5 * min(step_num−0.5, step_num * warmup_steps^−1.5)
@@ -58,12 +57,12 @@ class NoamOpt:
         )
 
     def _update_lr(self):
-        for param_group in self.opt.param_groups:
+        for param_group in self._opt.param_groups:
             param_group["lr"] = self._lr()
 
 
 class Trainer:
-    def __init__(self, model, device: torch.device) -> None:
+    def __init__(self, model, config, device: torch.device) -> None:
         """Training class to centralize training and validation logic.
 
         Args:
@@ -73,11 +72,10 @@ class Trainer:
         self.model = model.to(device)
         self.opt = NoamOpt(
             model.parameters(),
-            lr=0,
-            betas=(0.9, 0.98),
-            eps=1e-9,
+            betas=config.betas,
+            eps=config.eps,
             embed_dim=model.embed_dim,
-            warmup_steps=4000,
+            warmup_steps=config.warmup_steps,
         )
         self.device = device
 
@@ -109,10 +107,12 @@ class Trainer:
         return loss.item()
 
     def save_checkpoint(self, path: str):
+        if not os.path.exists(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
         torch.save(
             {
                 "model": self.model.state_dict(),
-                "opt": self.opt.state_dict(),
+                "opt": self.opt._opt.state_dict(),
                 "step": self.opt._step,
             },
             path,
@@ -121,7 +121,7 @@ class Trainer:
     def load_checkpoint(self, path: str):
         state = torch.load(path)
         self.model.load_state_dict(state["model"])
-        self.opt.load_state_dict(state["opt"])
+        self.opt._opt.load_state_dict(state["opt"])
         self.opt._step = state["step"]
 
 
@@ -206,7 +206,7 @@ class SimpleTextDataset(Dataset):
             )
             # save as a series of tokens, discarding sentence structure
             tokens = torch.cat([torch.tensor(x) for x in encoded["input_ids"]])
-            self.data = torch.tensor(tokens, dtype=torch.long)
+            self.data = torch.tensor(tokens.clone().detach(), dtype=torch.long)
             torch.save(self.data, f"{path}-{split}-tokenized.pt")
 
         self.block_size = config.hyperparams.block_size
