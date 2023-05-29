@@ -7,15 +7,10 @@ from absl import logging
 from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from ml_collections import config_dict
-from tokenizers import Tokenizer
-from tokenizers.models import BPE
-from tokenizers.normalizers import BertNormalizer
-from tokenizers.pre_tokenizers import Whitespace
-from tokenizers.trainers import BpeTrainer
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import Dataset
-from transformers import PreTrainedTokenizerFast
+from transformers import GPT2TokenizerFast
 
 
 class NoamOpt:
@@ -145,38 +140,6 @@ def setup_device() -> torch.device:
     return torch.device("cpu")
 
 
-def create_train_tokenizer(
-    raw_dataset: HFDataset,
-    tokenizer_file_path: str,
-    batch_size: int = 1000,
-    config: config_dict = None,
-) -> PreTrainedTokenizerFast:
-    if not os.path.exists(tokenizer_file_path):
-        # create the tokenizer
-        tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
-        trainer = BpeTrainer(
-            special_tokens=config.special_tokens,
-        )
-        tokenizer.pre_tokenizer = Whitespace()
-        tokenizer.normalizer = BertNormalizer()
-
-        # train tokenizer in batches
-        def batch_iterator():
-            for i in range(0, len(raw_dataset), batch_size):
-                yield raw_dataset[i : i + batch_size]["text"]
-
-        tokenizer.train_from_iterator(
-            batch_iterator(), trainer=trainer, length=len(raw_dataset)
-        )
-        tokenizer.save(tokenizer_file_path)
-    else:
-        tokenizer = Tokenizer.from_file(tokenizer_file_path)
-
-    # wrap in a fast tokenizer for reuse
-    wrapped_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    return wrapped_tokenizer, tokenizer.get_vocab_size()
-
-
 class SimpleTextDataset(Dataset):
     def __init__(
         self,
@@ -184,18 +147,18 @@ class SimpleTextDataset(Dataset):
         name: str,
         split: str,
         config: config_dict,
-        tokenizer_batch_size: int = 1000,
     ) -> None:
         raw_dataset = load_dataset(path, name, split=split)
         # remove empty rows
         raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
 
-        self.tokenizer, self.vocab_size = create_train_tokenizer(
-            raw_dataset,
-            tokenizer_file_path=f"{path}-tokenizer.json",
-            batch_size=tokenizer_batch_size,
-            config=config,
-        )
+        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+        tokenizer.bos_token = config.bos_token
+        tokenizer.eos_token = config.eos_token
+
+        self.tokenizer = tokenizer
+
+        self.vocab_size = self.tokenizer.vocab_size
 
         if os.path.exists(f"{path}-{split}-tokenized.pt"):
             self.data = torch.load(f"{path}-{split}-tokenized.pt")

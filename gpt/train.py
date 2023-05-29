@@ -95,7 +95,6 @@ class Transformer(nn.Module):
         block_size: int,
         attn_dropout: float,
         layer_dropout: float,
-        special_tokens: list[str],
     ) -> None:
         """Transformer based on decoder blocks.
 
@@ -114,7 +113,6 @@ class Transformer(nn.Module):
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
-        self.special_tokens = special_tokens
         # word embedding layers
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_embedding = nn.Embedding(vocab_size, embed_dim)
@@ -163,7 +161,7 @@ class Transformer(nn.Module):
                 idx,
                 (self.block_size - T, 0),
                 mode="constant",
-                value=self.special_tokens.index("[PAD]"),
+                value=0,
             )
             T = idx.size(1)
         # create embeddings
@@ -203,7 +201,7 @@ class Transformer(nn.Module):
         padded_prompt = F.pad(
             prompt,
             (0, steps),
-            value=self.special_tokens.index("[PAD]"),
+            value=0,
             mode="constant",
         )
         self.eval()
@@ -323,7 +321,7 @@ def sample(
         raise NotImplementedError("Empty prompt not yet supported.")
     path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
     if path.exists():
-        model.load_state_dict(torch.load(path, map_location=device))
+        model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
         tokenizer.encode(prompt, return_tensors="pt").to(device), FLAGS.gen_len
     )
@@ -361,7 +359,6 @@ def entrypoint(config: config_dict.ConfigDict):
             "block_size": config.hyperparams.block_size,
             "attn_dropout": config.hyperparams.dropout,
             "layer_dropout": config.hyperparams.dropout,
-            "special_tokens": config.special_tokens,
         }
     )
 
