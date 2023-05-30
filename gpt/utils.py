@@ -4,13 +4,12 @@ from typing import Any, Iterator
 import psutil
 import torch
 from absl import logging
-from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from ml_collections import config_dict
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import Dataset
-from transformers import GPT2TokenizerFast
+import tiktoken
 
 
 class NoamOpt:
@@ -121,6 +120,12 @@ class Trainer:
 
 
 def setup_device() -> torch.device:
+    """Determine which device to train on.
+    Only supports single GPU training for now.
+
+    Returns:
+        torch.device: device to use for training.
+    """
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
         logging.info(
@@ -148,40 +153,62 @@ class SimpleTextDataset(Dataset):
         split: str,
         config: config_dict,
     ) -> None:
+        """Construct a simple text dataset
+
+        Args:
+            path (str): path to dataset files
+            name (str): name of dataset
+            split (str): which split to load
+            config (config_dict): general config
+        """
         raw_dataset = load_dataset(path, name, split=split)
         # remove empty rows
         raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
+        encoding = tiktoken.get_encoding("cl100k_base")
 
-        tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-        tokenizer.bos_token = config.bos_token
-        tokenizer.eos_token = config.eos_token
-
-        self.tokenizer = tokenizer
-
-        self.vocab_size = self.tokenizer.vocab_size
+        self.encoding = encoding
+        self.vocab_size = self.encoding.n_vocab
+        self.block_size = config.hyperparams.block_size
 
         if os.path.exists(f"{path}-{split}-tokenized.pt"):
             self.data = torch.load(f"{path}-{split}-tokenized.pt")
         else:
-            encoded = raw_dataset.map(
-                lambda x: self.tokenizer(x["text"]),
-                batched=True,
-            )
+            raw_dataset = raw_dataset.map(
+                lambda x: {"ids": self.encoding.encode(x["text"])}
+            ).remove_columns(["text"])
+            tokens = raw_dataset["ids"]
+            end_token = self.encoding._special_tokens["<|endofprompt|>"]
+
+            # create uniform length sequences
+            for i in range(len(tokens)):
+                if len(tokens[i]) > self.block_size:
+                    extra_seq = tokens[i][self.block_size :]
+                    tokens[i] = torch.tensor(tokens[i][: self.block_size] + [end_token])
+                    while len(extra_seq) > self.block_size:
+                        padded_tokens = extra_seq[: self.block_size] + [end_token]
+                        padded_tokens = F.pad(
+                            torch.tensor(padded_tokens),
+                            (0, self.block_size - len(padded_tokens)),
+                            value=-1,
+                        )
+                        tokens.append(padded_tokens)
+                        extra_seq = extra_seq[self.block_size :]
+                else:
+                    tokens[i] = F.pad(
+                        torch.tensor(tokens[i] + [end_token]),
+                        (0, self.block_size - len(tokens[i])),
+                        value=-1,
+                    )
+
             # save as a series of tokens, discarding sentence structure
-            tokens = torch.cat([torch.tensor(x) for x in encoded["input_ids"]])
-            self.data = torch.tensor(tokens.clone().detach(), dtype=torch.long)
+            self.data = torch.stack(tokens)
             torch.save(self.data, f"{path}-{split}-tokenized.pt")
 
-        self.block_size = config.hyperparams.block_size
-
-    def encode(self, block_input: str) -> torch.Tensor:
-        return self.tokenizer(block_input)["input_ids"]
-
     def decode(self, block_ids: torch.Tensor) -> str:
-        return self.tokenizer.decode(block_ids)
+        return self.encoding.decode(block_ids)
 
     def tokenize(self, block_input: str) -> list[str]:
-        return self.tokenizer.tokenize(block_input)
+        return self.encoding.encode(block_input)
 
     def __len__(self) -> int:
         return len(self.data) - self.block_size

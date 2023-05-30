@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from utils import SimpleTextDataset, Trainer, setup_device
+from tiktoken.core import Encoding
 
 FLAGS = flags.FLAGS
 
@@ -66,11 +67,11 @@ class DecoderBlock(nn.Module):
         self.ln2 = nn.LayerNorm(embed_dim)
         self.return_attn_weights = return_attn_weights
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # self attention and residual
-        causal_mask = torch.tril(torch.ones(self.block_size, self.block_size)).to(
-            x.device
-        )
+    def forward(
+        self, x: torch.Tensor, attn_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # self attention and residual, -1 denotes padding
+        causal_mask = torch.tril(attn_mask).squeeze().to(x.device)
         attn_out, attn_weights = self.multihead_attention(
             x, x, x, attn_mask=causal_mask
         )
@@ -87,7 +88,6 @@ class DecoderBlock(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        *,
         vocab_size: int,
         blocks: int,
         num_heads: int,
@@ -109,7 +109,8 @@ class Transformer(nn.Module):
         """
         super().__init__()
         self.stack_count = blocks
-        self.block_size = block_size
+        # add 2 for <s> and </s>
+        self.block_size = block_size + 2
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
@@ -118,12 +119,12 @@ class Transformer(nn.Module):
         self.pos_embedding = nn.Embedding(vocab_size, embed_dim)
         self.positional_encoding(self.pos_embedding.weight)
         # decoder stack
-        self.decoder_stack = nn.Sequential(
-            *[
+        self.decoder_stack = nn.ModuleList(
+            [
                 DecoderBlock(
-                    num_heads,
-                    embed_dim,
-                    block_size,
+                    self.num_heads,
+                    self.embed_dim,
+                    self.block_size,
                     attn_dropout=attn_dropout,
                     layer_dropout=layer_dropout,
                     return_attn_weights=(i == blocks - 1),
@@ -154,16 +155,10 @@ class Transformer(nn.Module):
     def forward(
         self, idx: torch.Tensor, bypass_embedding: bool = False
     ) -> torch.Tensor:
-        # pad input
+        # create mask for padding
         B, T = idx.size()
-        if T < self.block_size:
-            idx = F.pad(
-                idx,
-                (self.block_size - T, 0),
-                mode="constant",
-                value=0,
-            )
-            T = idx.size(1)
+        attn_mask = (idx != -1).expand(idx.size(0), self.block_size, self.block_size)
+
         # create embeddings
         if bypass_embedding:
             input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
@@ -171,9 +166,14 @@ class Transformer(nn.Module):
             tok_embed = self.embedding(idx) * self.embed_dim**0.5
             pos_embed = self.pos_embedding(idx)
             input_embed = tok_embed + pos_embed
+
         # feed to transformer
         x = self.dropout(input_embed)
-        x, attn_weights = self.decoder_stack(x)
+        for i in range(len(self.decoder_stack)):
+            if i == len(self.decoder_stack) - 1:
+                out, attn_weights = self.decoder_stack[i](out, attn_mask)
+            else:
+                out = self.decoder_stack[i](out if i > 0 else x, attn_mask)
         x = self.ln(x)
         x = self.linear(x)
         return x, attn_weights
@@ -300,7 +300,7 @@ def train(
 def sample(
     model: Transformer,
     prompt: str,
-    tokenizer,
+    encoding: Encoding,
     config: config_dict,
     device: torch.device,
 ):
@@ -309,7 +309,7 @@ def sample(
     Args:
         model (Transformer): _description_
         prompt (str): string prompt to start generation
-        tokenizer (_type_): tokenizer
+        encoding (Encoding): BPE tokenizer encoding
         config (config_dict): source of truth
         device (torch.device): _description_
 
@@ -318,14 +318,14 @@ def sample(
     """
     # if empty prompt, begin with SOS token
     if prompt == "":
-        raise NotImplementedError("Empty prompt not yet supported.")
+        prompt = "<|endofprompt|>"
     path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
     if path.exists():
         model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
-        tokenizer.encode(prompt, return_tensors="pt").to(device), FLAGS.gen_len
+        torch.tensor(encoding.encode(prompt)).to(device), FLAGS.gen_len
     )
-    return tokenizer.decode(generated_tokens)
+    return encoding.decode(generated_tokens)
 
 
 def entrypoint(config: config_dict.ConfigDict):
@@ -379,7 +379,7 @@ def entrypoint(config: config_dict.ConfigDict):
         train(model, train_loader, device, config)
     elif FLAGS.run_mode == "generate":
         generated_text = sample(
-            model, FLAGS.prompt, dataset_train.tokenizer, config, device
+            model, FLAGS.prompt, dataset_train.encoding, config, device
         )
         logging.info(f"Generated text: '{generated_text}'")
 

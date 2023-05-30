@@ -6,8 +6,7 @@ def get_config():
     # general
     config.seed = 38
     config.steps = 10000
-    config.bos_token = "<bos>"
-    config.eos_token = "<eos>"
+    config.bos_token = "<|endofprompt|>"
     # hyperparameters
     config.hyperparams = config_dict.ConfigDict(
         {
