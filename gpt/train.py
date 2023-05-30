@@ -157,8 +157,8 @@ class Transformer(nn.Module):
     ) -> torch.Tensor:
         # create mask for padding
         B, T = idx.size()
-        attn_mask = (idx != -1).expand(idx.size(0), self.block_size, self.block_size)
-
+        assert T == self.block_size, "input sequence length mismatch"
+        attn_mask = (idx != -1).expand(idx.size(0), T, T)
         # create embeddings
         if bypass_embedding:
             input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
@@ -205,10 +205,13 @@ class Transformer(nn.Module):
             mode="constant",
         )
         self.eval()
+
         # autoregressively generate tokens
         for i in range(T, steps):
+            x = padded_prompt[:, i - self.block_size : i]
+            padded_input = F.pad(x, (0, self.block_size - x.size(1)))
             logits, _ = self.forward(
-                padded_prompt[:, i - self.block_size : i],
+                padded_input,
                 bypass_embedding=False,
             )
             # only use last token logits
@@ -319,13 +322,15 @@ def sample(
     # if empty prompt, begin with SOS token
     if prompt == "":
         prompt = "<|endofprompt|>"
+    else:
+        prompt += " "
     path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
     if path.exists():
         model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
-        torch.tensor(encoding.encode(prompt)).to(device), FLAGS.gen_len
+        torch.tensor([encoding.encode(prompt)]).to(device), FLAGS.gen_len
     )
-    return encoding.decode(generated_tokens)
+    return encoding.decode(list(generated_tokens))
 
 
 def entrypoint(config: config_dict.ConfigDict):
