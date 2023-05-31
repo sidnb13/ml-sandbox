@@ -188,15 +188,16 @@ class SimpleTextDataset(Dataset):
                         padded_tokens = extra_seq[: self.block_size] + [end_token]
                         padded_tokens = F.pad(
                             torch.tensor(padded_tokens),
-                            (0, self.block_size - len(padded_tokens)),
+                            (0, self.block_size - len(padded_tokens) + 1),
                             value=-1,
                         )
                         tokens.append(padded_tokens)
                         extra_seq = extra_seq[self.block_size :]
                 else:
+                    sequence = torch.tensor(tokens[i] + [end_token])
                     tokens[i] = F.pad(
-                        torch.tensor(tokens[i] + [end_token]),
-                        (0, self.block_size - len(tokens[i])),
+                        sequence,
+                        (0, self.block_size - len(sequence) + 1),
                         value=-1,
                     )
 
@@ -211,11 +212,13 @@ class SimpleTextDataset(Dataset):
         return self.encoding.encode(block_input)
 
     def __len__(self) -> int:
-        return len(self.data) - self.block_size
+        return len(self.data)
 
     def __getitem__(self, index) -> Any:
-        # Consider block_size + 1 tokens from the dataset, starting from index.
+        inputs = self.data[index][:-1]
+        targets = torch.roll(self.data[index], -1)[:-1]
+
         return {
-            "input": self.data[index : index + self.block_size],
-            "target": self.data[index + 1 : index + self.block_size + 1],
+            "input": inputs,
+            "target": targets,
         }

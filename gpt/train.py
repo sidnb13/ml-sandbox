@@ -71,9 +71,10 @@ class DecoderBlock(nn.Module):
         self, x: torch.Tensor, attn_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # self attention and residual, -1 denotes padding
-        causal_mask = torch.tril(attn_mask).squeeze().to(x.device)
+        _, T, _ = x.shape
+        causal_mask = torch.tril(torch.ones(T, T)).to(x.device)
         attn_out, attn_weights = self.multihead_attention(
-            x, x, x, attn_mask=causal_mask
+            x, x, x, attn_mask=causal_mask, key_padding_mask=attn_mask
         )
         x = self.ln1(x + attn_out)
         # feed forward and residual
@@ -109,8 +110,8 @@ class Transformer(nn.Module):
         """
         super().__init__()
         self.stack_count = blocks
-        # add 2 for <s> and </s>
-        self.block_size = block_size + 2
+        # add 2 for <sos> token
+        self.block_size = block_size
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
@@ -158,7 +159,7 @@ class Transformer(nn.Module):
         # create mask for padding
         B, T = idx.size()
         assert T == self.block_size, "input sequence length mismatch"
-        attn_mask = (idx != -1).expand(idx.size(0), T, T)
+        attn_mask = idx != -1
         # create embeddings
         if bypass_embedding:
             input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
@@ -169,11 +170,13 @@ class Transformer(nn.Module):
 
         # feed to transformer
         x = self.dropout(input_embed)
+        out = x
         for i in range(len(self.decoder_stack)):
+            results = self.decoder_stack[i](out, attn_mask)
             if i == len(self.decoder_stack) - 1:
-                out, attn_weights = self.decoder_stack[i](out, attn_mask)
+                out, attn_weights = results
             else:
-                out = self.decoder_stack[i](out if i > 0 else x, attn_mask)
+                out = results
         x = self.ln(x)
         x = self.linear(x)
         return x, attn_weights

@@ -10,12 +10,12 @@ def get_config():
     # hyperparameters
     config.hyperparams = config_dict.ConfigDict(
         {
-            "batch_size": 8,
-            "embed_dim": 64,
-            "heads": 2,
+            "batch_size": 16,
+            "embed_dim": 256,
+            "heads": 4,
             "blocks": 3,
             "dropout": 0.1,
-            "block_size": 16,
+            "block_size": 256,
         }
     )
     config.warmup_steps = 4000
