@@ -2,14 +2,14 @@ import os
 from typing import Any, Iterator
 
 import psutil
+import requests
+import tiktoken
 import torch
 from absl import logging
-from datasets import load_dataset
 from ml_collections import config_dict
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import Dataset
-import tiktoken
 
 
 class NoamOpt:
@@ -148,8 +148,6 @@ def setup_device() -> torch.device:
 class SimpleTextDataset(Dataset):
     def __init__(
         self,
-        path: str,
-        name: str,
         split: str,
         config: config_dict,
     ) -> None:
@@ -157,53 +155,47 @@ class SimpleTextDataset(Dataset):
 
         Args:
             path (str): path to dataset files
-            name (str): name of dataset
             split (str): which split to load
             config (config_dict): general config
         """
-        raw_dataset = load_dataset(path, name, split=split)
-        # remove empty rows
-        raw_dataset = raw_dataset.filter(lambda x: len(x["text"]) > 0)
+
+        self.config = config
+
         encoding = tiktoken.get_encoding("cl100k_base")
 
         self.encoding = encoding
         self.vocab_size = self.encoding.n_vocab
         self.block_size = config.hyperparams.block_size
 
-        if os.path.exists(f"{path}-{split}-tokenized.pt"):
-            self.data = torch.load(f"{path}-{split}-tokenized.pt")
+        filename = os.path.join(os.path.dirname(__file__), "data.txt")
+        if not os.path.exists(filename):
+            with open(filename, "w") as f:
+                f.write(requests.get(config.data_url).text)
+        with open(filename, "r") as f:
+            text = f.read()
+
+        if split == "train":
+            text = text[: int(config.train_split * len(text))]
+        elif split == "val":
+            text = text[int((1 - config.train_split) * len(text)) :]
         else:
-            raw_dataset = raw_dataset.map(
-                lambda x: {"ids": self.encoding.encode(x["text"])}
-            ).remove_columns(["text"])
-            tokens = raw_dataset["ids"]
-            end_token = self.encoding._special_tokens["<|endofprompt|>"]
+            raise ValueError(f"Invalid split: {split}")
 
-            # create uniform length sequences
-            for i in range(len(tokens)):
-                if len(tokens[i]) > self.block_size:
-                    extra_seq = tokens[i][self.block_size :]
-                    tokens[i] = torch.tensor(tokens[i][: self.block_size] + [end_token])
-                    while len(extra_seq) > self.block_size:
-                        padded_tokens = extra_seq[: self.block_size] + [end_token]
-                        padded_tokens = F.pad(
-                            torch.tensor(padded_tokens),
-                            (0, self.block_size - len(padded_tokens) + 1),
-                            value=-1,
-                        )
-                        tokens.append(padded_tokens)
-                        extra_seq = extra_seq[self.block_size :]
-                else:
-                    sequence = torch.tensor(tokens[i] + [end_token])
-                    tokens[i] = F.pad(
-                        sequence,
-                        (0, self.block_size - len(sequence) + 1),
-                        value=-1,
-                    )
+        save_path = os.path.join(
+            os.path.dirname(__file__),
+            "saved",
+            f"{split}-{self.block_size}-tokenized.pt",
+        )
 
-            # save as a series of tokens, discarding sentence structure
-            self.data = torch.stack(tokens)
-            torch.save(self.data, f"{path}-{split}-tokenized.pt")
+        if not os.path.exists(os.path.dirname(save_path)):
+            os.makedirs(save_path)
+
+        self.data = torch.tensor(encoding.encode_ordinary(text))
+
+        if os.path.exists(save_path):
+            self.data = torch.load(save_path)
+        else:
+            torch.save(self.data, save_path)
 
     def decode(self, block_ids: torch.Tensor) -> str:
         return self.encoding.decode(block_ids)
@@ -211,12 +203,16 @@ class SimpleTextDataset(Dataset):
     def tokenize(self, block_input: str) -> list[str]:
         return self.encoding.encode(block_input)
 
-    def __len__(self) -> int:
+    @property
+    def num_tokens(self) -> int:
         return len(self.data)
 
+    def __len__(self) -> int:
+        return len(self.data) - self.block_size
+
     def __getitem__(self, index) -> Any:
-        inputs = self.data[index][:-1]
-        targets = torch.roll(self.data[index], -1)[:-1]
+        inputs = self.data[index : index + self.block_size]
+        targets = self.data[index + 1 : index + self.block_size + 1]
 
         return {
             "input": inputs,

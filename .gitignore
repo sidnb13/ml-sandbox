@@ -11,5 +11,5 @@
 data/*
 wandb/
 gpt/wikitext-tokenizer.json
-gpt/wikitext-train-tokenized.pt
+**/*.pt
 **/checkpoints/

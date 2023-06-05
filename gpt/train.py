@@ -2,6 +2,7 @@
 Small decoder-only transfomer for autoregressive text generation.
 """
 
+import datetime
 import pathlib
 import time
 from itertools import cycle
@@ -10,11 +11,11 @@ import torch
 import wandb
 from absl import app, flags, logging
 from ml_collections import config_dict, config_flags
+from tiktoken.core import Encoding
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from utils import SimpleTextDataset, Trainer, setup_device
-from tiktoken.core import Encoding
 
 FLAGS = flags.FLAGS
 
@@ -74,7 +75,11 @@ class DecoderBlock(nn.Module):
         _, T, _ = x.shape
         causal_mask = torch.tril(torch.ones(T, T)).to(x.device)
         attn_out, attn_weights = self.multihead_attention(
-            x, x, x, attn_mask=causal_mask, key_padding_mask=attn_mask
+            x,
+            x,
+            x,
+            attn_mask=causal_mask.to(torch.bool),
+            key_padding_mask=attn_mask.to(torch.bool),
         )
         x = self.ln1(x + attn_out)
         # feed forward and residual
@@ -159,7 +164,7 @@ class Transformer(nn.Module):
         # create mask for padding
         B, T = idx.size()
         assert T == self.block_size, "input sequence length mismatch"
-        attn_mask = idx != -1
+        attn_mask = idx == -1
         # create embeddings
         if bypass_embedding:
             input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
@@ -200,25 +205,37 @@ class Transformer(nn.Module):
             top_p (float, optional): top-p nucleus probability. Defaults to 0.9.
         """
         _, T = prompt.size()
-        assert 0 < steps
+        assert T < steps, "prompt length must be less than steps"
         padded_prompt = F.pad(
             prompt,
-            (0, steps),
-            value=0,
+            (0, ((steps + T) // self.block_size + 1) * self.block_size - T + steps),
+            value=-1,
             mode="constant",
         )
+
         self.eval()
 
+        # define context window size
+        window_start, window_end = 0, self.block_size
+
         # autoregressively generate tokens
-        for i in range(T, steps):
-            x = padded_prompt[:, i - self.block_size : i]
-            padded_input = F.pad(x, (0, self.block_size - x.size(1)))
+        for i in range(T, T + steps):
+            x = padded_prompt[:, window_start:window_end]
+
+            mask = x > -1
+            if torch.all(mask):
+                window_start += 1
+                window_end += 1
+
+            last_token = len(x[mask]) - 1
+
             logits, _ = self.forward(
-                padded_input,
+                x,
                 bypass_embedding=False,
             )
-            # only use last token logits
-            logits = logits[:, -1, :] / temperature
+
+            # only use last token logits, ignoring pad
+            logits = logits[:, last_token, :] / temperature
 
             # top-k sampling
             if top_k > 0:
@@ -250,8 +267,10 @@ def init_test(model: Transformer, device: torch.device):
     num_params = sum(p.numel() for p in model.parameters())
     model.eval()
     sample = torch.zeros(1, 4, dtype=torch.long, device=device)
+
     # generate random text
     logging.info(f"Sample: {model.generate(sample, 4)}")
+
     # check loss at init
     ip = torch.zeros(1, model.block_size, device=device, dtype=torch.long)
     loss = Trainer.loss_fn(
@@ -259,12 +278,28 @@ def init_test(model: Transformer, device: torch.device):
     )
     random_init_loss = -torch.log(torch.tensor(1 / model.vocab_size))
     logging.info(f"Number of parameters: {num_params}")
+
+    # calculate size of the model
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    logging.info("model size: {:.3f}MB".format(size_all_mb))
     logging.info(f"loss: {loss} | random_init: {random_init_loss}")
+
     assert abs(loss.item() - random_init_loss) < 1e-5, "softmax loss check failed"
 
 
 def train(
-    model: Transformer, train_loader: DataLoader, device: torch.device, config: dict
+    model: Transformer,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    config: dict,
 ):
     """Train the model.
 
@@ -278,8 +313,11 @@ def train(
     trainer = Trainer(model, config, device)
     # train model
     train_iter = cycle(iter(train_loader))
+    val_iter = cycle(iter(val_loader))
     # model load logic
-    model_path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
+    if config.checkpt_name is None:
+        config.checkpt_name = f"checkpt-{datetime.datetime.now().timestamp()}.pt"
+    model_path = pathlib.Path(config.checkpt_dir) / config.checkpt_name
     if config.checkpt_dir is not None and config.load_model:
         if not model_path.exists():
             raise ValueError(f"Model path {model_path} does not exist.")
@@ -294,12 +332,26 @@ def train(
         end = time.time()
         # eval
         if step % config.log_interval == 0:
+            val_batch = next(val_iter)
+            with torch.no_grad():
+                val_loss = trainer.eval_step(val_batch)
+
+            log_params = {
+                "time": end - start,
+                "train_loss": loss,
+                "val_loss": val_loss,
+                "lr": trainer.opt._lr(),
+                "step": step,
+            }
+
             logging.info(
-                f"step: {step:07}\t|\tloss: {loss:3f}\t|\tlr: {trainer.opt._lr():6f}\t|\ttime: {end - start:2f}"
+                "step: {step:07} |\ttrain loss: {train_loss:3f} |\tval loss: {val_loss:3f} |\tlr: {lr:6f} |\ttime: {time:2f}".format_map(
+                    log_params
+                )
             )
             if config.use_wandb:
-                wandb.log({"loss": loss, "lr": trainer.opt._lr(), "step": step})
-                wandb.save(model_path)
+                wandb.log(log_params)
+                wandb.save(str(model_path))
             trainer.save_checkpoint(model_path)
 
 
@@ -325,14 +377,15 @@ def sample(
     # if empty prompt, begin with SOS token
     if prompt == "":
         prompt = "<|endofprompt|>"
-    else:
-        prompt += " "
     path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
     if path.exists():
         model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
         torch.tensor([encoding.encode(prompt)]).to(device), FLAGS.gen_len
     )
+    # prune padding
+    print(generated_tokens)
+    generated_tokens = generated_tokens[generated_tokens != -1]
     return encoding.decode(list(generated_tokens))
 
 
@@ -344,18 +397,25 @@ def entrypoint(config: config_dict.ConfigDict):
     # seed
     torch.manual_seed(config.seed)
 
+    wb_config = config.to_dict()
+    wb_config.update(FLAGS.flag_values_dict())
+
     if config.use_wandb:
         wandb.init(
             settings=wandb.Settings(start_method="fork"),
             project=config.wandb_project,
             entity=config.wandb_entity,
-            config=FLAGS.flag_values_dict(),
+            config=wb_config,
         )
 
     # create datasets
-    dataset_train = SimpleTextDataset("wikitext", "wikitext-2-raw-v1", "train", config)
+    dataset_train = SimpleTextDataset("train", config)
+    dataset_val = SimpleTextDataset("val", config)
     train_loader = DataLoader(
         dataset_train, batch_size=config.hyperparams.batch_size, shuffle=True
+    )
+    val_loader = DataLoader(
+        dataset_val, batch_size=config.hyperparams.batch_size, shuffle=False
     )
 
     model_config = config_dict.FrozenConfigDict(
@@ -384,7 +444,7 @@ def entrypoint(config: config_dict.ConfigDict):
     if FLAGS.run_mode == "debug":
         return init_test(model, device)
     if FLAGS.run_mode == "train":
-        train(model, train_loader, device, config)
+        train(model, train_loader, val_loader, device, config)
     elif FLAGS.run_mode == "generate":
         generated_text = sample(
             model, FLAGS.prompt, dataset_train.encoding, config, device
