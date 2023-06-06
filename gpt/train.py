@@ -318,7 +318,7 @@ def train(
     if config.checkpt_name is None:
         config.checkpt_name = f"checkpt-{datetime.datetime.now().timestamp()}.pt"
     # gpt hack
-    model_path = pathlib.Path(config.checkpt_dir.replace(" ", "\\ ")) / config.checkpt_name
+    model_path = pathlib.Path(config.checkpt_dir) / config.checkpt_name
     if config.checkpt_dir is not None and config.load_model:
         if not model_path.exists():
             raise ValueError(f"Model path {model_path} does not exist.")

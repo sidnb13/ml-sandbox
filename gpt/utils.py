@@ -186,8 +186,6 @@ class SimpleTextDataset(Dataset):
             "saved",
             f"{split}-{self.block_size}-tokenized.pt",
         )
-        # colab hack
-        save_path = save_path.replace(" ", "\\ ")
 
         if not os.path.exists(os.path.dirname(save_path)):
             os.makedirs(os.path.dirname(save_path))
