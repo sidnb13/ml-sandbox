@@ -188,7 +188,7 @@ class SimpleTextDataset(Dataset):
         )
 
         if not os.path.exists(os.path.dirname(save_path)):
-            os.makedirs(save_path)
+            os.makedirs(os.path.dirname(save_path))
 
         self.data = torch.tensor(encoding.encode_ordinary(text))
 
