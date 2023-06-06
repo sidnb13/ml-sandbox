@@ -314,16 +314,23 @@ def train(
     # train model
     train_iter = cycle(iter(train_loader))
     val_iter = cycle(iter(val_loader))
+
     # model load logic
     if config.checkpt_name is None:
         config.checkpt_name = f"checkpt-{datetime.datetime.now().timestamp()}.pt"
-    # gpt hack
     model_path = pathlib.Path(config.checkpt_dir) / config.checkpt_name
+
     if config.checkpt_dir is not None and config.load_model:
         if not model_path.exists():
             raise ValueError(f"Model path {model_path} does not exist.")
         logging.info(f"Loading model from {model_path}")
         trainer.load_checkpoint(model_path)
+
+    if config.use_wandb:
+        artifact = wandb.Artifact("checkpoint", type="model")
+        artifact.add_file(str(model_path), name=config.checkpt_name)
+        wandb.log_artifact(artifact)
+
     start_step = max(trainer.opt._step, 0)
     # train loop
     for step in range(start_step, config.steps):
@@ -352,7 +359,6 @@ def train(
             )
             if config.use_wandb:
                 wandb.log(log_params)
-                wandb.save(str(model_path))
             trainer.save_checkpoint(model_path)
 
 
