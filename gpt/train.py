@@ -412,7 +412,11 @@ def sample(
     if path.exists():
         model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
-        torch.tensor([encoding.encode(prompt)]).to(device), FLAGS.gen_len
+        torch.tensor([encoding.encode(prompt)]).to(device),
+        FLAGS.gen_len,
+        config.temperature,
+        config.top_k,
+        config.top_p,
     )
     # prune padding
     generated_tokens = generated_tokens[generated_tokens != -1]
