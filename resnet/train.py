@@ -1,6 +1,5 @@
 """ResNet implementation in PyTorch."""
-from datetime import datetime
-from typing import Type
+from typing import Union
 
 import config
 import matplotlib.pyplot as plt
@@ -172,7 +171,7 @@ class ResNet(nn.Module):
 
     def _create_layer(
         self,
-        block: Type[ResidualBlock | Bottleneck],
+        block: Union[ResidualBlock, Bottleneck],
         channels: int,
         num_blks=1,
         stride=1,
