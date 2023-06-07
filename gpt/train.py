@@ -299,7 +299,7 @@ def train(
     train_loader: DataLoader,
     val_loader: DataLoader,
     device: torch.device,
-    config: dict,
+    config: config_dict,
 ):
     """Train the model.
 
@@ -316,24 +316,30 @@ def train(
     val_iter = cycle(iter(val_loader))
 
     # model load logic
-    if config.checkpt_name is None:
-        config.checkpt_name = f"checkpt-{datetime.datetime.now().timestamp()}.pt"
-    model_path = pathlib.Path(config.checkpt_dir) / config.checkpt_name
+    model_path = pathlib.Path(config.checkpt_dir) / "model.pt"
 
-    if config.checkpt_dir is not None and config.load_model:
-        if not model_path.exists():
-            raise ValueError(f"Model path {model_path} does not exist.")
-        logging.info(f"Loading model from {model_path}")
-        trainer.load_checkpoint(model_path)
+    if config.load_model:
+        if wandb.run and (wandb.run.id or config.run_id):
+            logging.info(f"Loading model from wandb run {config.run_id}")
+            run_path = (
+                "/".join([config.wandb_entity, config.wandb_project, config.run_id])
+                if config.run_id
+                else None
+            )
+            wandb_model = wandb.restore(
+                "model.pt",
+                run_path=run_path,
+            )
+            trainer.load_checkpoint(wandb_model.name)
+        else:
+            if not model_path.exists():
+                raise FileNotFoundError("No model found to load")
 
-    if config.use_wandb:
-        artifact = wandb.Artifact("checkpoint", type="model")
-        artifact.add_file(str(model_path), name=config.checkpt_name)
-        wandb.log_artifact(artifact)
+            logging.info(f"Loading model from {model_path}")
+            trainer.load_checkpoint(model_path)
 
-    start_step = max(trainer.opt._step, 0)
     # train loop
-    for step in range(start_step, config.steps):
+    for step in range(max(trainer.opt._step, 0), config.steps):
         batch = next(train_iter)
         start = time.time()
         loss = trainer.train_step(batch)
@@ -359,6 +365,7 @@ def train(
             )
             if config.use_wandb:
                 wandb.log(log_params)
+                wandb.save(str(model_path))
             trainer.save_checkpoint(model_path)
 
 
@@ -413,6 +420,7 @@ def entrypoint(config: config_dict.ConfigDict):
             project=config.wandb_project,
             entity=config.wandb_entity,
             config=wb_config,
+            resume=config.load_model,
         )
 
     # create datasets

@@ -27,11 +27,11 @@ def get_config():
     # io and logging
     config.log_interval = 10
     config.checkpt_dir = "checkpoints"
-    config.checkpt_name = "gpt-mini-test.pt"
     config.save_dir = "results"
     # wandb
     config.use_wandb = False
     config.wandb_entity = "sidharth-baskaran"
     config.wandb_project = "gpt"
+    config.run_id = None
 
     return config
