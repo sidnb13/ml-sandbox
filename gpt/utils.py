@@ -119,13 +119,17 @@ class Trainer:
         self.opt._step = state["step"]
 
 
-def setup_device() -> torch.device:
+def setup_device(device: str) -> torch.device:
     """Determine which device to train on.
     Only supports single GPU training for now.
 
     Returns:
         torch.device: device to use for training.
     """
+
+    if device != "auto":
+        return torch.device(device)
+
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
         logging.info(

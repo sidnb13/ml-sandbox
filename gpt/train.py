@@ -2,7 +2,6 @@
 Small decoder-only transfomer for autoregressive text generation.
 """
 
-import datetime
 import pathlib
 import time
 from itertools import cycle
@@ -16,6 +15,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from utils import SimpleTextDataset, Trainer, setup_device
+import os
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+torch.autograd.set_detect_anomaly(True)
 
 FLAGS = flags.FLAGS
 
@@ -121,8 +124,8 @@ class Transformer(nn.Module):
         self.embed_dim = embed_dim
         self.vocab_size = vocab_size
         # word embedding layers
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=-1)
+        self.pos_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=-1)
         self.positional_encoding(self.pos_embedding.weight)
         # decoder stack
         self.decoder_stack = nn.ModuleList(
@@ -169,8 +172,8 @@ class Transformer(nn.Module):
         if bypass_embedding:
             input_embed = torch.zeros((B, T, self.embed_dim), device=idx.device)
         else:
-            tok_embed = self.embedding(idx) * self.embed_dim**0.5
-            pos_embed = self.pos_embedding(idx)
+            tok_embed = self.embedding(idx * ~attn_mask) * self.embed_dim**0.5
+            pos_embed = self.pos_embedding(idx * ~attn_mask)
             input_embed = tok_embed + pos_embed
 
         # feed to transformer
@@ -244,14 +247,16 @@ class Transformer(nn.Module):
 
             # nucleus sampling
             if 1 > top_p > 0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                sorted_logits, sorted_indices = torch.sort(
+                    logits, descending=True, dim=-1
+                )
                 cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 remove_idx = cum_probs > top_p
                 # correct removal indices to keep first token
                 remove_idx[:, 0] = 0
                 remove_idx[:, 1:] = remove_idx[:, :-1].clone()
                 removal_indices = sorted_indices[remove_idx]
-                logits[removal_indices] = -float("inf")
+                logits[:, removal_indices] = -float("inf")
 
             # sample from filtered distribution
             dist = F.softmax(logits, dim=-1)
@@ -316,18 +321,21 @@ def train(
     val_iter = cycle(iter(val_loader))
 
     # model load logic
-    model_path = pathlib.Path(config.checkpt_dir) / "model.pt"
+    checkpt_dir = pathlib.Path(config.checkpt_dir)
+    model_path = checkpt_dir / "model.pt"
 
     if config.load_model:
-        if wandb.run and (wandb.run.id or config.run_id):
-            logging.info(f"Loading model from wandb run {config.run_id}")
+        if wandb.run and wandb.run.resumed:
             run_path = (
                 "/".join([config.wandb_entity, config.wandb_project, config.run_id])
                 if config.run_id
                 else None
             )
+            logging.info(
+                f"Loading model from {run_path if run_path else wandb.run.path}"
+            )
             wandb_model = wandb.restore(
-                "model.pt",
+                f"{config.checkpt_dir}/model.pt",
                 run_path=run_path,
             )
             trainer.load_checkpoint(wandb_model.name)
@@ -391,14 +399,22 @@ def sample(
     # if empty prompt, begin with SOS token
     if prompt == "":
         prompt = "<|endofprompt|>"
-    path = pathlib.Path(config.checkpt_dir) / "checkpoint.pt"
+    if config.run_id:
+        restored_model = wandb.restore(
+            f"{config.checkpt_dir}/model.pt",
+            run_path="/".join(
+                [config.wandb_entity, config.wandb_project, config.run_id]
+            ),
+        ).name
+        path = pathlib.Path(restored_model)
+    else:
+        path = pathlib.Path(config.checkpt_dir) / "model.pt"
     if path.exists():
         model.load_state_dict(torch.load(path, map_location=device)["model"])
     generated_tokens = model.generate(
         torch.tensor([encoding.encode(prompt)]).to(device), FLAGS.gen_len
     )
     # prune padding
-    print(generated_tokens)
     generated_tokens = generated_tokens[generated_tokens != -1]
     return encoding.decode(list(generated_tokens))
 
@@ -406,7 +422,7 @@ def sample(
 def entrypoint(config: config_dict.ConfigDict):
     """Main entrypoint for different tasks."""
     logging.info(f"Using wandb: {config.use_wandb}")
-    device = setup_device()
+    device = setup_device(config.device)
 
     # seed
     torch.manual_seed(config.seed)
@@ -420,7 +436,8 @@ def entrypoint(config: config_dict.ConfigDict):
             project=config.wandb_project,
             entity=config.wandb_entity,
             config=wb_config,
-            resume=config.load_model,
+            id=config.run_id,
+            resume="must" if config.run_id else True if config.load_model else False,
         )
 
     # create datasets

@@ -5,6 +5,7 @@ def get_config():
     config = config_dict.ConfigDict()
     # general
     config.seed = 38
+    config.device = "cpu"
     # data
     config.data_url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     config.train_split = 0.9
@@ -32,6 +33,6 @@ def get_config():
     config.use_wandb = False
     config.wandb_entity = "sidharth-baskaran"
     config.wandb_project = "gpt"
-    config.run_id = None
+    config.run_id = ""
 
     return config
