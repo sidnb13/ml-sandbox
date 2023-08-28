@@ -2,6 +2,7 @@
 Small decoder-only transfomer for autoregressive text generation.
 """
 
+import os
 import pathlib
 import time
 from itertools import cycle
@@ -15,7 +16,6 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from utils import SimpleTextDataset, Trainer, setup_device
-import os
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 torch.autograd.set_detect_anomaly(True)
