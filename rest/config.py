@@ -15,7 +15,11 @@ class TrainingConfig:
 
 @dataclass
 class DatasetConfig:
-    pass
+    input_column: str = "input"
+    target_column: str = "target"
+    max_seq_len: int = 512
+    # for DeBERTA model used
+    vocab_size: int = 128100
 
 
 @dataclass
@@ -27,10 +31,13 @@ class TransformerConfig:
     residual_dropout: float = 0.1
     attention_dropout: float = 0.1
     max_seq_len: int = 512
-    vocab_size: int = 32000
+    # for DeBERTA model used
+    vocab_size: int = 128100
 
 
 def get_config():
     config = config_dict.ConfigDict()
+
+    # TODO
 
     return config

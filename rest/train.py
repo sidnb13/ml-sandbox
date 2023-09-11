@@ -161,6 +161,19 @@ class Transformer(nn.Module):
                 out_, out, attn_mask, causal_mask, deterministic=deterministic
             )
 
-        out = jnp.matmul(out, self.embedding.embedding)  # (B, T, E)
-        out = nn.log_softmax(out, axis=-1)
-        return out
+        logits = jnp.matmul(out, self.embedding.embedding)  # (B, T, E)
+        return logits
+
+
+class FlanDataset(Dataset):
+    def __init__(self, dataset_config: DatasetConfig) -> None:
+        super().__init__()
+        # TODO load flan dataset
+        # TODO tokenizer
+
+    def __getitem__(self, index: int) -> Any:
+        # TODO transform OTF
+        pass
+
+    def __len__(self) -> int:
+        pass
