@@ -252,7 +252,7 @@ class Transformer(nn.Module):
                 )
                 cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                 remove_idx = cum_probs > top_p
-                # correct removal indices to keep first token
+                # correct removal indices to keep padding token
                 remove_idx[:, 0] = 0
                 remove_idx[:, 1:] = remove_idx[:, :-1].clone()
                 removal_indices = sorted_indices[remove_idx]

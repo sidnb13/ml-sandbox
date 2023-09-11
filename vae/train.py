@@ -2,6 +2,7 @@
 
 import itertools
 import logging
+import os
 import pathlib
 
 import config
@@ -199,9 +200,11 @@ def main(argv):
                     ],
                 ]
             )
+            path = f"{config.result_dir}/generated_{step // config.test_interval}.png"
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             save_image(
                 comparison.cpu(),
-                f"{config.result_dir}/generated_{step // config.test_interval}.png",
+                path,
                 nrow=config.gen_samples,
             )
 

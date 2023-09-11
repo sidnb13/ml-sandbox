@@ -4,7 +4,7 @@ from datetime import datetime
 # hyperparameters
 num_classes = 10
 batch_size = 100
-lr = 1e-2
+lr = 1e-3
 steps = 10_000
 
 # vae params
