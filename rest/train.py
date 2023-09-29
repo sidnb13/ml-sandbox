@@ -9,10 +9,26 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from absl import app, flags
+from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from ml_collections import config_dict, config_flags
+from config import RestConfig, TrainingConfig, DatasetConfig, TransformerConfig
 
-from .config import DatasetConfig, RestConfig, TrainingConfig, TransformerConfig
+# define configuration file
+config_flags.DEFINE_config_file(
+    "config",
+    None,
+    "Config file for training.",
+    lock_config=True,
+)
+
+flags.DEFINE_bool(
+    "wandb",
+    False,
+    "Whether or not to log run to wandb",
+)
 
 
 class EncoderBlock(nn.Module):
@@ -29,11 +45,9 @@ class EncoderBlock(nn.Module):
             dropout_rate=self.attention_dropout,
         )
         self.mlp = nn.Sequential(
-            nn.Dense(self.ffn_dim),
-            nn.gelu,
-            nn.Dense(self.embedding_dim),
-            nn.Dropout(self.residual_dropout),
+            [nn.Dense(self.ffn_dim), nn.gelu, nn.Dense(self.embedding_dim)]
         )
+        self.dropout = nn.Dropout(self.residual_dropout)
         self.ln1 = nn.LayerNorm()
         self.ln2 = nn.LayerNorm()
 
@@ -45,7 +59,8 @@ class EncoderBlock(nn.Module):
     ) -> None:
         out = self.attn(hidden_state, mask=attn_mask, deterministic=deterministic)
         out = out + self.ln1(out)
-        out = out + self.mlp(out, deterministic=deterministic)
+        out = out + self.mlp(out)
+        out = self.dropout(out, deterministic=deterministic)
         out = out + self.ln2(out)
         return out
 
@@ -69,11 +84,9 @@ class DecoderBlock(nn.Module):
             dropout_rate=self.attention_dropout,
         )
         self.mlp = nn.Sequential(
-            nn.Dense(self.ffn_dim),
-            nn.gelu,
-            nn.Dense(self.embedding_dim),
-            nn.Dropout(self.residual_dropout),
+            [nn.Dense(self.ffn_dim), nn.gelu, nn.Dense(self.embedding_dim)],
         )
+        self.dropout = nn.Dropout(self.residual_dropout)
         self.ln1 = nn.LayerNorm()
         self.ln2 = nn.LayerNorm()
 
@@ -89,12 +102,8 @@ class DecoderBlock(nn.Module):
         out = self.self_attn(hidden_state, mask=mask, deterministic=deterministic)
         out = out + self.ln1(out)
         out = self.mha(inputs_q=out, inputs_kv=context, deterministic=deterministic)
-        out = out + nn.Sequential(
-            nn.Dense(self.ffn_dim),
-            nn.gelu,
-            nn.Dense(self.embedding_dim),
-            nn.Dropout(self.residual_dropout, deterministic=deterministic),
-        )(out)
+        out = out + self.mlp(out)
+        out = self.dropout(out, deterministic=deterministic)
         out = self.ln2(out)
         return out
 
@@ -146,34 +155,98 @@ class Transformer(nn.Module):
     ) -> jnp.ndarray:
         B, input_len = input_ids.shape
         _, target_len = targets.shape
-        causal_mask = nn.make_causal_mask(jnp.ones(B, input_len))
+        causal_mask = nn.make_causal_mask(jnp.ones((B, input_len)))
         emb_tokens = self.embedding(input_ids)
         emb_pos = self.pos_embedding[:, :input_len, :]
-        out_ = emb_tokens + emb_pos
+        ctx = emb_tokens + emb_pos
 
         for encoder_block in self.encoder_blocks:
-            out_ = encoder_block(out_, attn_mask, deterministic=deterministic)
+            ctx = encoder_block(ctx, attn_mask, deterministic=deterministic)
 
         out = self.embedding(targets) + self.pos_embedding[:, :target_len, :]
 
         for decoder_block in self.decoder_blocks:
             out = decoder_block(
-                out_, out, attn_mask, causal_mask, deterministic=deterministic
+                ctx, out, attn_mask, causal_mask, deterministic=deterministic
             )
 
-        logits = jnp.matmul(out, self.embedding.embedding)  # (B, T, E)
+        logits = jnp.matmul(self.embedding.embedding, out)  # (B, V, E)
         return logits
 
 
 class FlanDataset(Dataset):
-    def __init__(self, dataset_config: DatasetConfig) -> None:
+    def __init__(self, split: str, dataset_config: DatasetConfig) -> None:
         super().__init__()
-        # TODO load flan dataset
-        # TODO tokenizer
+        self.input_column = dataset_config.input_column
+        self.target_column = dataset_config.target_column
+        self.max_seq_len = dataset_config.max_seq_len
+        self._dataset = load_dataset(dataset_config.ds_name, split=split)
+        self.reward_tokenizer = AutoTokenizer.from_pretrained(
+            dataset_config.reward_tokenizer
+        )
+        self.reward_tokenizer.pad_token_id = self.reward_tokenizer.eos_token_id
+        self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def __getitem__(self, index: int) -> Any:
-        # TODO transform OTF
-        pass
+        item = self._dataset[index]
+        input_ = item[self.input_column]
+        target_ = item[self.target_column]
+        input_kwargs = dict(
+            text=input_,
+            max_length=self.max_seq_len,
+            padding="max_length",
+            truncation=True,
+            return_tensors="np",
+        )
+        target_kwargs = dict(
+            text=target_,
+            max_length=self.max_seq_len,
+            padding="max_length",
+            truncation=True,
+            return_tensors="np",
+        )
+        input_model = self.tokenizer(**input_kwargs)
+        target_model = self.tokenizer(**target_kwargs)
+        input_reward = self.reward_tokenizer(**input_kwargs)
+        target_reward = self.reward_tokenizer(**target_kwargs)
+
+        return {
+            "model": {
+                "input_ids": input_model["input_ids"].squeeze(),
+                "targets": target_model["input_ids"].squeeze(),
+                "attention_mask": input_model["attention_mask"].squeeze(),
+            },
+            "reward": {
+                "input_ids": input_reward["input_ids"].squeeze(),
+                "targets": target_reward["input_ids"].squeeze(),
+                "attention_mask": input_reward["attention_mask"].squeeze(),
+            },
+        }
 
     def __len__(self) -> int:
-        pass
+        return len(self._dataset)
+
+
+def main(argv):
+    del argv  # Unused.
+    rng = jax.random.PRNGKey(0)
+    key, param_rng, dropout_rng = jax.random.split(rng, 3)
+
+    # ds = FlanDataset("train", DatasetConfig())
+    # print(ds[0])
+
+    model = Transformer(TransformerConfig())
+    params = model.init(
+        {"dropout": dropout_rng, "params": param_rng},
+        jax.random.randint(key, (1, 512), 0, 128100),
+        jnp.ones((1, 512), dtype=jnp.int32),
+        jnp.ones((1, 512), dtype=jnp.int32),
+        deterministic=True,
+    )
+
+    print(jax.tree_util.tree_map(lambda x: x.shape, params))
+
+
+if __name__ == "__main__":
+    app.run(main)

@@ -24,6 +24,7 @@ jaxlib = "^0.4.14"
 jax = {extras = ["cpu"], version = "^0.4.14"}
 flax = {git = "https://github.com/google/flax.git"}
 transformers = "^4.33.1"
+sentencepiece = "^0.1.99"
 
 
 [build-system]

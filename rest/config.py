@@ -15,8 +15,10 @@ class TrainingConfig:
 
 @dataclass
 class DatasetConfig:
-    input_column: str = "input"
-    target_column: str = "target"
+    ds_name: str = "Muennighoff/flan"
+    reward_tokenizer: str = "microsoft/deberta-v3-large"
+    input_column: str = "inputs"
+    target_column: str = "targets"
     max_seq_len: int = 512
     # for DeBERTA model used
     vocab_size: int = 128100
@@ -33,7 +35,6 @@ class TransformerConfig:
     max_seq_len: int = 512
     # for DeBERTA model used
     vocab_size: int = 128100
-
 
 def get_config():
     config = config_dict.ConfigDict()
